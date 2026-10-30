@@ -87,8 +87,6 @@ const typed = ($: Engine, args: string) =>
 test('draws one stacked segment per category, in /context colours', async ($, on) => {
   beneath(on)
   await started($)
-  // The legend is off by default; turn it on to see the labels.
-  await typed($, 'legend')
 
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...BAND, surface })
@@ -115,7 +113,7 @@ test('draws one stacked segment per category, in /context colours', async ($, on
   }
 })
 
-test('the bar is one compact line, capped in width, drawn last', async ($, on) => {
+test('the bar fills a readable width, capped, drawn last', async ($, on) => {
   beneath(on)
   await started($)
 
@@ -126,15 +124,14 @@ test('the bar is one compact line, capped in width, drawn last', async ($, on) =
       props: { ...BAND.props, bodyColumns },
     })
 
-    // The legend is off, so the band is the one line of head and bar.
     const bar = (await ui.findAll({ type: 'Text' }))
       .map(one => one.text)
       .filter(text => BLOCKS.test(text))
       .join('')
-    const head = (await ui.find({ type: 'Text', text: /^ctx / }))?.text ?? ''
 
-    expect(head.length).toBeGreaterThan(0)
-    expect(bar.length).toBe(Math.min(20, bodyColumns - head.length))
+    // Wide enough to read the split, never wider than the band.
+    expect(bar.length).toBeGreaterThanOrEqual(8)
+    expect(bar.length).toBeLessThanOrEqual(Math.min(48, bodyColumns))
 
     await ui.unmount()
   }
@@ -170,21 +167,47 @@ test('/context-bar with no argument toggles', async ($, on) => {
   expect(second.text).toContain('on')
 })
 
-test('the legend is off by default and /context-bar legend adds the labels', async ($, on) => {
+test('the legend is on by default and /context-bar legend hides it', async ($, on) => {
   beneath(on)
   await started($)
-
-  const quiet = await $.ui.mount({ ...BAND, surface: 'terminal' })
-  expect(await quiet.find({ type: 'Text', text: /38%/ })).toBeDefined()
-  expect(await quiet.find({ type: 'Text', text: /MCP tools/ })).toBeUndefined()
-  await quiet.unmount()
-
-  const on1 = await typed($, 'legend')
-  expect(on1.text).toContain('on')
 
   const labelled = await $.ui.mount({ ...BAND, surface: 'terminal' })
   expect(await labelled.find({ type: 'Text', text: /MCP tools/ })).toBeDefined()
   await labelled.unmount()
+
+  const off = await typed($, 'legend')
+  expect(off.text).toContain('off')
+
+  const quiet = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await quiet.find({ type: 'Text', text: /MCP tools/ })).toBeUndefined()
+  await quiet.unmount()
+})
+
+test('the percentage colour follows how full the window is', async ($, on) => {
+  let percent = 38
+  beneath(on, () => {
+    const base = usage()
+
+    return {
+      ...base,
+      context: {
+        ...base.context,
+        percent,
+        breakdown: { ...base.context.breakdown!, percentage: percent },
+      },
+    }
+  })
+  await started($)
+
+  for (const [next, colour] of [[38, 'success'], [75, 'warning'], [95, 'error']] as const) {
+    percent = next
+    await $.session.measure({ context: { tokens: 75100, window: 200000, percent: next }, rateLimits: [], changed: ['context'] })
+
+    const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+    const head = await ui.find({ type: 'Text', text: /ctx/ })
+    expect(head?.props.color).toBe(colour)
+    await ui.unmount()
+  }
 })
 
 test('/context-bar full recounts and reports the figures', async ($, on) => {

@@ -5,13 +5,17 @@ import type { ContextRow, ContextSnapshot } from '../types'
 
 const snapshot = atom({ plugin: 'context-bar', key: 'snapshot' } as const, null)
 const isShown = atom({ plugin: 'context-bar', key: 'isShown' } as const, true)
-const hasLegend = atom({ plugin: 'context-bar', key: 'hasLegend' } as const, false)
+const hasLegend = atom({ plugin: 'context-bar', key: 'hasLegend' } as const, true)
 
 const FILLED = '█'
 const HOLLOW = '░'
 
-/** Most cells the bar takes: enough to read the split, never the whole row. */
-const BAR_CELLS = 20
+/** Most cells the bar takes: wide enough to read each category's share. */
+const BAR_CELLS = 48
+
+/** The colour of the fill percentage: calm, then warning, then near the limit. */
+const fillColour = (percent: number): string =>
+  percent >= 90 ? 'error' : percent >= 70 ? 'warning' : 'success'
 
 /** Where each kind sits in the bar: what is spent, the reserve, then the room left. */
 const RANK: Record<ContextRow['kind'], number> = { used: 0, buffer: 1, free: 2, deferred: 3 }
@@ -181,8 +185,9 @@ export const register: Register = on => {
     const { Box, Text } = $.ui.resolve(e)
     const width = Math.max(20, e.props.bodyColumns)
     const spent = taken.costUsd === undefined ? '' : ` ${money(taken.costUsd)}`
-    const head = `ctx ${String(Math.round(taken.percent)).padStart(2)}% ${human(taken.total)}/${human(taken.max)}${spent} `
-    const cells = Math.min(BAR_CELLS, Math.max(8, width - head.length))
+    const head = `ctx ${String(Math.round(taken.percent)).padStart(3)}%`
+    const figures = ` ${human(taken.total)}/${human(taken.max)}${spent}`
+    const cells = Math.min(BAR_CELLS, Math.max(8, width - head.length - figures.length - 1))
     const bar = allocate(taken.rows, cells)
       .filter(segment => segment.cells > 0)
       .map(({ row, cells: count }) => (
@@ -218,7 +223,8 @@ export const register: Register = on => {
       <Box flexDirection="column">
         {legend}
         <Box key="bar">
-          <Text dimColor>{head}</Text>
+          <Text color={fillColour(taken.percent)} bold>{head}</Text>
+          <Text dimColor>{figures} </Text>
           {bar}
         </Box>
       </Box>
