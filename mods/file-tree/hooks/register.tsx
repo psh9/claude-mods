@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, SessionMessage } from 'claude-code'
 
-import type { Activity, Chat, GitView, GraphLine, Layout, Op, Plan, Step, TouchedFile } from '../types'
+import type { Activity, Chat, Explore, GitView, GraphLine, Hit, Layout, Op, Plan, Search, Step, TouchedFile } from '../types'
 
 const PANE = 'file-tree'
 const PLAN_TOOL = 'mcp__file-tree__plan'
@@ -26,6 +26,13 @@ const git = atom({ plugin: 'file-tree', key: 'git' } as const, null, {
 })
 const chats = atom({ plugin: 'file-tree', key: 'chats' } as const, { current: '', nodes: [] }, {
   shape: 'chats-1',
+})
+const FOLLOWING: Explore = { root: null, open: [], cursor: '', on: 'tree', isAsking: false }
+const explore = atom({ plugin: 'file-tree', key: 'explore' } as const, FOLLOWING, {
+  shape: 'explore-1',
+})
+const search = atom({ plugin: 'file-tree', key: 'search' } as const, null, {
+  shape: 'search-1',
 })
 
 const TOOL_OPS: Record<string, Op> = {
@@ -81,6 +88,36 @@ const PLANS_KEY = 'plans'
 const MAX_PLANS = 100
 const MAX_CHAT_ROWS = 8
 const BRANCH_COMMANDS = new Set(['branch', 'fork'])
+// Search: hits kept, matches per file, and the share of the pane's room the
+// results take beside the tree (more while the cursor is in them).
+const MAX_HITS = 500
+const MAX_PER_FILE = 50
+const SEARCH_SHARE = 0.4
+const SEARCH_SHARE_ON = 0.6
+const GREP_INPUT = 'grep'
+// Never searched into, as the tree hides them.
+// grep and rg options whose value is the next word.
+const SEARCH_VALUE_OPTIONS = new Set([
+  '-m', '--max-count', '-A', '-B', '-C', '-g', '--glob', '-t', '--type', '-T', '--type-not',
+  '-f', '--file', '--include', '--exclude', '--exclude-dir', '-M', '--max-columns', '-j', '--threads',
+])
+const SEARCH_EXCLUDE = ['.git', 'node_modules', '__pycache__', '.venv', 'venv', '.next', '.cache']
+
+// Opens a file in vim (or $VISUAL, $EDITOR) beside Claude Code: in a new tmux
+// window when Claude Code runs in tmux, else a new Windows Terminal tab under
+// WSL. A mod's process has no terminal, so vim cannot run in this one.
+// Exits 3 with nowhere to open it, 4 with no editor.
+const OPEN_SCRIPT = `
+file=$1 line=$2 dir=$3
+ed=$(command -v "\${VISUAL:-\${EDITOR:-vim}}" || command -v vim || command -v vi) || exit 4
+if [ -n "$TMUX" ] && command -v tmux >/dev/null 2>&1; then
+  tmux new-window -c "$dir" "$ed" "+$line" "$file" && echo tmux && exit 0
+fi
+if [ -n "$WSL_DISTRO_NAME" ] && command -v wt.exe >/dev/null 2>&1; then
+  wt.exe -w 0 new-tab --title "\${file##*/}" wsl.exe -d "$WSL_DISTRO_NAME" --cd "$dir" -- "$ed" "+$line" "$file" && echo 'Windows Terminal' && exit 0
+fi
+exit 3
+`
 
 // Tokyo Night (night).
 const C = {
@@ -96,6 +133,7 @@ const C = {
   orange: '#ff9e64',
   red: '#f7768e',
   cursorLine: '#292e42',
+  selection: '#364a82',
   visual: '#283457',
   badgeText: '#1a1b26',
 }
@@ -1040,45 +1078,60 @@ const drawGit = async ($: EngineInterface, e: RenderEvent, width: number, root: 
   ]
 }
 
+// The tree as it stands: the folder the person explores, else the one the
+// latest activity is in; its open folders, its rows, and the row in focus.
+const treeModel = async ($: EngineInterface) => {
+  const touched = await read($, files)
+  const { active, last } = await read($, activity)
+  const walking = await read($, explore)
+  const root = walking.root ?? last?.root ?? cwd
+  const here = touched.filter(one => one.root === root)
+  const open = new Set<string>([root])
+  if (walking.root !== null) {
+    for (const dir of walking.open) if (isUnder(dir, root)) open.add(dir)
+  } else {
+    // Expand every folder that leads to something touched or in progress.
+    const leads = [
+      ...here.map(one => one.path),
+      ...active.map(one => one.path),
+      ...(last === null ? [] : [last.path]),
+    ].filter(path => isUnder(path, root))
+    for (const path of leads) {
+      for (let dir = parentOf(path); isUnder(dir, root) && dir !== root; dir = parentOf(dir)) {
+        open.add(dir)
+      }
+    }
+  }
+  const rows: Row[] = []
+  await walk($, root, '', open, new Map(here.map(one => [one.path, one])), rows)
+  const focus = walking.root !== null ? walking.cursor : active.at(-1)?.path ?? last?.path
+
+  return { root, here, touched, open, rows, focus, walking }
+}
+
 // The tree of the folder the latest activity is in, its rows windowed to
 // the room, with the header and footer around it.
 const drawTree = async ($: EngineInterface, e: RenderEvent, width: number, room: number) => {
   const { Box, Text } = $.ui.resolve(e)
-  const touched = await read($, files)
   const { active, last } = await read($, activity)
   const now = await $.clock.now()
-  const root = last?.root ?? cwd
-  const here = touched.filter(one => one.root === root)
+  const { root, here, touched, rows, focus, walking } = await treeModel($)
   const elsewhere = new Map<string, TouchedFile[]>()
   for (const one of touched) {
     if (one.root !== root) elsewhere.set(one.root, [...(elsewhere.get(one.root) ?? []), one])
   }
-
-  // Expand every folder that leads to something touched or in progress.
-  const open = new Set<string>([root])
-  const leads = [
-    ...here.map(one => one.path),
-    ...active.map(one => one.path),
-    ...(last === null ? [] : [last.path]),
-  ].filter(path => isUnder(path, root))
-  for (const path of leads) {
-    for (let dir = parentOf(path); isUnder(dir, root) && dir !== root; dir = parentOf(dir)) {
-      open.add(dir)
-    }
-  }
-
-  const rows: Row[] = []
-  await walk($, root, '', open, new Map(here.map(one => [one.path, one])), rows)
   const footer = [...elsewhere.entries()].slice(0, 3)
-  const focus = active.at(-1)?.path ?? last?.path
   const shown = windowRows(rows, Math.max(3, room - 1 - footer.length), focus)
+  const cursor = walking.root !== null && walking.on === 'tree' ? walking.cursor : undefined
 
   const view = shown.map(row => {
     const file = row.touched
     const running = active.findLast(one => one.path === row.path)
     const isRecent = running === undefined && last !== null
       && last.path === row.path && now - last.at < FLASH_MS
-    const background = running !== undefined ? C.visual : isRecent ? C.cursorLine : undefined
+    const isCursor = cursor !== undefined && row.path === cursor
+    const background = isCursor ? C.selection
+      : running !== undefined ? C.visual : isRecent ? C.cursorLine : undefined
     const icon = row.tone === 'openDir' ? '▾ ' : row.tone === 'dir' ? '▸ ' : ''
     const nameColor =
       row.tone === 'openDir' || row.tone === 'dir' ? C.blue
@@ -1101,7 +1154,7 @@ const drawTree = async ($: EngineInterface, e: RenderEvent, width: number, room:
             {icon !== '' && <Text color={row.tone === 'openDir' ? C.blue : C.comment}>{icon}</Text>}
             <Text
               color={nameColor}
-              bold={row.tone === 'openDir' || running !== undefined || isRecent
+              bold={isCursor || row.tone === 'openDir' || running !== undefined || isRecent
                 || (file !== undefined && file.kind !== 'read')}
             >
               {row.name}
@@ -1132,7 +1185,9 @@ const drawTree = async ($: EngineInterface, e: RenderEvent, width: number, room:
       <Box flexShrink={1}>
         <Text wrap="truncate-end">
           <Text color={C.purple} bold>{tildify(root)}</Text>
-          {root !== cwd && <Text color={C.comment} italic>{`  away from ${tildify(cwd)}`}</Text>}
+          {walking.root !== null
+            ? <Text color={C.comment} italic>  exploring</Text>
+            : root !== cwd && <Text color={C.comment} italic>{`  away from ${tildify(cwd)}`}</Text>}
         </Text>
       </Box>
       <Box flexShrink={0} paddingLeft={1}>{totals}</Box>
@@ -1151,7 +1206,443 @@ const drawTree = async ($: EngineInterface, e: RenderEvent, width: number, room:
     )
   })
 
-  return { header, view, lines }
+  return { header, view, lines, root }
+}
+
+const relative = (path: string, root: string) =>
+  path === root ? '.' : isUnder(path, root) ? path.slice(root === '/' ? 1 : root.length + 1) : tildify(path)
+
+// `path\0line:text` lines, as rg --null and grep -Z print them.
+const parseHits = (stdout: string): Hit[] => {
+  const hits: Hit[] = []
+  for (const line of stdout.split('\n')) {
+    const nul = line.indexOf('\u0000')
+    if (nul < 0) continue
+    const found = /^(\d+):(.*)$/.exec(line.slice(nul + 1))
+    if (found === null) continue
+    hits.push({ path: line.slice(0, nul), line: Number(found[1]), text: (found[2] ?? '').trim().slice(0, 300) })
+    if (hits.length >= MAX_HITS + 1) break
+  }
+
+  return hits
+}
+
+type SearchAsk = { pattern: string; path: string; by: Search['by']; glob?: string; ignoreCase?: boolean }
+
+// Lists every line matching `pattern` under `path` with rg, else grep, and
+// shows them in the pane.
+const runSearch = async ($: EngineInterface, ask: SearchAsk) => {
+  const root = await $.fs.stat(ask.path).then(stat => (stat.kind === 'dir' ? ask.path : parentOf(ask.path)))
+    .catch(() => parentOf(ask.path))
+  const rg = [
+    'rg', '--line-number', '--no-heading', '--null', '--color=never', '--sort=path',
+    '--max-columns=300', '--max-columns-preview', `--max-count=${MAX_PER_FILE}`,
+    ask.ignoreCase === true ? '-i' : '--smart-case',
+    ...(ask.glob === undefined ? [] : ['--glob', ask.glob]),
+    '-e', ask.pattern, '--', ask.path,
+  ]
+  const grep = [
+    'grep', '-rnIZ', `--max-count=${MAX_PER_FILE}`,
+    ...SEARCH_EXCLUDE.map(dir => `--exclude-dir=${dir}`),
+    ...(ask.ignoreCase === true ? ['-i'] : []),
+    ...(ask.glob === undefined ? [] : [`--include=${ask.glob}`]),
+    '-e', ask.pattern, '--', ask.path,
+  ]
+  const missing = { exitCode: 127, stdout: '', stderr: '' }
+  let ran = await $.process.run(rg, { cwd: root, timeoutMs: 15000 }).catch(() => missing)
+  if (ran.exitCode === 127) ran = await $.process.run(grep, { cwd: root, timeoutMs: 15000 }).catch(() => missing)
+  const hits = parseHits(ran.stdout)
+  const error = ran.exitCode > 1 && hits.length === 0
+    ? ran.stderr.split('\n').find(line => line.trim() !== '') ?? `search failed (${ran.exitCode})`
+    : ''
+  const at = await $.clock.now()
+  await update($, search, () => ({
+    pattern: ask.pattern,
+    root,
+    by: ask.by,
+    hits: hits.slice(0, MAX_HITS),
+    isTruncated: hits.length > MAX_HITS,
+    cursor: 0,
+    error,
+    at,
+  }))
+}
+
+// Claude's grep or rg command: its pattern, the folder or file it searched,
+// and whether it ignored case. The first such command of a line.
+const shellSearch = (command: string, base: string, home: string): Omit<SearchAsk, 'by'> | undefined => {
+  const expand = (word: string) => normalize(word === '~' || word.startsWith('~/') ? home + word.slice(1) : word, dir)
+  let dir = base
+  for (const line of commandLines(command)) {
+    const tokens = tokenize(line)
+    for (let i = 0; i < tokens.length; i++) {
+      const name = tokens[i] ?? ''
+      // A plain `cd dir` moves where later paths are read from.
+      const target = tokens[i + 1]
+      if (name === 'cd' && target !== undefined && !target.includes('$') && !/^[;|&()]+$/.test(target)) {
+        dir = expand(target)
+        continue
+      }
+      if (name !== 'grep' && name !== 'rg' && name !== 'egrep') continue
+      if (i > 0 && !/^[;|&()]+$/.test(tokens[i - 1] ?? '') && !PREFIX_CMDS.has(tokens[i - 1] ?? '')) continue
+      // A grep reading a pipe searches no files.
+      if (i > 0 && tokens[i - 1] === '|') continue
+      let pattern: string | undefined
+      let ignoreCase = false
+      const paths: string[] = []
+      for (let j = i + 1; j < tokens.length && !/^[;|&()<>]+$/.test(tokens[j] ?? ''); j++) {
+        const arg = tokens[j] ?? ''
+        if (arg === '-e' || arg === '--regexp') pattern = tokens[++j]
+        else if (arg === '-i' || arg === '--ignore-case' || (/^-[a-zA-Z]+$/.test(arg) && arg.includes('i'))) ignoreCase = true
+        else if (SEARCH_VALUE_OPTIONS.has(arg)) j++
+        else if (arg.startsWith('-')) continue
+        else if (pattern === undefined) pattern = arg
+        else paths.push(arg)
+      }
+      if (pattern === undefined || pattern === '') return undefined
+      const first = paths[0] ?? '.'
+      if (first.includes('$') || /[*?[\]{}]/.test(first)) return undefined
+      const path = expand(first)
+
+      return { pattern, path, ignoreCase }
+    }
+  }
+
+  return undefined
+}
+
+const openInEditor = async ($: EngineInterface, path: string, line: number) => {
+  const ran = await $.process.run(
+    ['sh', '-c', OPEN_SCRIPT, 'open', path, String(Math.max(1, line)), parentOf(path)],
+    { timeoutMs: 10000 },
+  ).catch(() => ({ exitCode: 1, stdout: '', stderr: 'sh did not run' }))
+  const where = ran.stdout.trim()
+  $.ui.toast(
+    ran.exitCode === 0 ? `Opened ${relative(path, cwd)} in vim (${where})`
+      : ran.exitCode === 3 ? `No tmux or Windows Terminal to open vim in. Run: vim +${line} ${tildify(path)}`
+        : ran.exitCode === 4 ? 'No vim found ($VISUAL, $EDITOR, vim or vi)'
+          : `vim did not open: ${ran.stderr.trim() || `exit ${ran.exitCode}`}`,
+  )
+}
+
+// The person's first key takes the tree over from Claude, as it stands.
+const takeTree = async ($: EngineInterface): Promise<Explore> => {
+  const walking = await read($, explore)
+  if (walking.root !== null) return walking
+  const model = await treeModel($)
+  const first = model.rows.find(row => row.path !== '')?.path ?? model.root
+  const cursor = model.focus !== undefined && model.rows.some(row => row.path === model.focus) ? model.focus : first
+  const taken: Explore = { ...walking, root: model.root, open: [...model.open], cursor }
+  await update($, explore, () => taken)
+
+  return taken
+}
+
+const rowAtCursor = async ($: EngineInterface) => {
+  await takeTree($)
+  const model = await treeModel($)
+
+  return { model, row: model.rows.find(row => row.path !== '' && row.path === model.walking.cursor) }
+}
+
+const hitAtCursor = async ($: EngineInterface) => {
+  const found = await read($, search)
+
+  return found?.hits[found.cursor]
+}
+
+const inSearch = async ($: EngineInterface) =>
+  (await read($, explore)).on === 'search' && ((await read($, search))?.hits.length ?? 0) > 0
+
+// j and k: a row down or up, in the list the cursor is in.
+const move = async ($: EngineInterface, by: number) => {
+  if (await inSearch($)) {
+    await update($, search, now => (now === null ? now : {
+      ...now, cursor: Math.min(now.hits.length - 1, Math.max(0, now.cursor + by)),
+    }))
+
+    return
+  }
+  const { model } = await rowAtCursor($)
+  const paths = model.rows.filter(row => row.path !== '').map(row => row.path)
+  const at = paths.indexOf(model.walking.cursor)
+  const next = paths[Math.min(paths.length - 1, Math.max(0, at < 0 ? 0 : at + by))]
+  if (next !== undefined) await update($, explore, now => ({ ...now, cursor: next }))
+}
+
+// l: opens the folder under the cursor, or the file in vim.
+const openRow = async ($: EngineInterface) => {
+  if (await inSearch($)) return editHere($)
+  const { row } = await rowAtCursor($)
+  if (row === undefined) return
+  if (row.tone === 'file') return openInEditor($, row.path, 1)
+  await update($, explore, now => ({ ...now, open: [...new Set([...now.open, row.path])] }))
+}
+
+// h: closes the folder under the cursor, else the one holding it.
+const closeRow = async ($: EngineInterface) => {
+  if (await inSearch($)) {
+    await update($, explore, (now): Explore => ({ ...now, on: 'tree' }))
+
+    return
+  }
+  const { model, row } = await rowAtCursor($)
+  if (row === undefined) return
+  const target = row.tone === 'openDir' ? row.path : parentOf(row.path)
+  if (target === model.root || !isUnder(target, model.root)) return
+  await update($, explore, now => ({
+    ...now,
+    cursor: target,
+    open: now.open.filter(dir => !isUnder(dir, target)),
+  }))
+}
+
+// e: the file under the cursor in vim, at the line of a search hit.
+const editHere = async ($: EngineInterface) => {
+  if (await inSearch($)) {
+    const hit = await hitAtCursor($)
+    if (hit !== undefined) await openInEditor($, hit.path, hit.line)
+
+    return
+  }
+  const { row } = await rowAtCursor($)
+  if (row?.tone === 'file') await openInEditor($, row.path, 1)
+  else $.ui.toast('Not a file: l opens a folder')
+}
+
+// a: an @-mention of the file under the cursor in the prompt, for Claude.
+const mentionHere = async ($: EngineInterface) => {
+  const hit = (await inSearch($)) ? await hitAtCursor($) : undefined
+  const path = hit?.path ?? (await rowAtCursor($)).row?.path
+  if (path === undefined) return
+  const text = `@${relative(path, cwd)}${hit === undefined ? '' : ` (line ${hit.line})`} `
+  const filled = await $.prompt.fill({ text, mode: 'insert' }).catch(() => ({ isFilled: false }))
+  if (!filled.isFilled) $.ui.toast(`Could not reach the prompt: ${text}`)
+}
+
+// n and p: the next or previous file, in the search's hits or among the
+// files Claude touched.
+const jumpFile = async ($: EngineInterface, by: 1 | -1) => {
+  if (await inSearch($)) {
+    await update($, search, now => {
+      if (now === null) return now
+      const here = now.hits[now.cursor]?.path
+      const order = by === 1 ? now.hits.map((hit, index) => ({ hit, index }))
+        : now.hits.map((hit, index) => ({ hit, index })).reverse()
+      const start = order.findIndex(one => one.index === now.cursor)
+      const found = order.slice(start + 1).find(one => one.hit.path !== here)
+      if (found === undefined) return now
+      // Backwards, land on that file's first hit.
+      const first = now.hits.findIndex(hit => hit.path === found.hit.path)
+
+      return { ...now, cursor: by === 1 ? found.index : first }
+    })
+
+    return
+  }
+  const { model } = await rowAtCursor($)
+  const paths = model.here.map(one => one.path).sort()
+  if (paths.length === 0) {
+    $.ui.toast('No file read or changed here yet')
+
+    return
+  }
+  const cursor = model.walking.cursor
+  const next = by === 1 ? paths.find(path => path > cursor) ?? paths[0]
+    : [...paths].reverse().find(path => path < cursor) ?? paths.at(-1)
+  if (next === undefined) return
+  const dirs: string[] = []
+  for (let dir = parentOf(next); isUnder(dir, model.root) && dir !== model.root; dir = parentOf(dir)) dirs.push(dir)
+  await update($, explore, now => ({ ...now, cursor: next, open: [...new Set([...now.open, ...dirs])] }))
+}
+
+const askGrep = async ($: EngineInterface) => {
+  await takeTree($)
+  await update($, explore, now => ({ ...now, isAsking: true }))
+  await $.ui.focus({ requestId: PANE, key: GREP_INPUT }).catch(() => undefined)
+}
+
+const submitGrep = async ($: EngineInterface, pattern: string) => {
+  const walking = await update($, explore, now => ({ ...now, isAsking: false }))
+  if (pattern.trim() === '') return
+  await runSearch($, { pattern, path: walking.root ?? cwd, by: 'person' })
+  await update($, explore, (now): Explore => ({ ...now, on: 'search' }))
+}
+
+const toggleList = async ($: EngineInterface) => {
+  const found = await read($, search)
+  if (found === null) return $.ui.toast('No search yet: g to grep')
+  await takeTree($)
+  await update($, explore, (now): Explore => ({ ...now, on: now.on === 'search' ? 'tree' : 'search' }))
+}
+
+const clearSearch = async ($: EngineInterface) => {
+  await update($, search, () => null)
+  await update($, explore, (now): Explore => ({ ...now, on: 'tree', isAsking: false }))
+}
+
+// f: back to following Claude.
+const follow = async ($: EngineInterface) => {
+  await update($, explore, () => FOLLOWING)
+}
+
+const KEYS = [
+  { hotkey: 'j', label: 'down' },
+  { hotkey: 'k', label: 'up' },
+  { hotkey: 'l', label: 'open' },
+  { hotkey: 'h', label: 'close' },
+  { hotkey: 'e', label: 'vim' },
+  { hotkey: 'a', label: '@claude' },
+  { hotkey: 'g', label: 'grep' },
+  { hotkey: 'n', label: 'next file' },
+  { hotkey: 'p', label: 'prev file' },
+  { hotkey: 't', label: 'tree/hits' },
+  { hotkey: 'x', label: 'clear' },
+  { hotkey: 'f', label: 'follow' },
+] as const
+
+const pressKey = async ($: EngineInterface, hotkey: (typeof KEYS)[number]['hotkey']) => {
+  switch (hotkey) {
+    case 'j': return move($, 1)
+    case 'k': return move($, -1)
+    case 'l': return openRow($)
+    case 'h': return closeRow($)
+    case 'e': return editHere($)
+    case 'a': return mentionHere($)
+    case 'g': return askGrep($)
+    case 'n': return jumpFile($, 1)
+    case 'p': return jumpFile($, -1)
+    case 't': return toggleList($)
+    case 'x': return clearSearch($)
+    case 'f': return follow($)
+  }
+}
+
+// The keys while the pane holds them, else a line saying how to take them.
+const drawKeys = async ($: EngineInterface, e: RenderEvent, width: number, isFocused: boolean) => {
+  const elements = $.ui.resolve(e)
+  const { Box, Button, Text } = elements
+  // The mobile app draws no field.
+  const Input = 'Input' in elements ? elements.Input : undefined
+  const walking = await read($, explore)
+  const field = walking.isAsking && Input !== undefined
+    ? [
+        <Input
+          key={GREP_INPUT}
+          label="grep "
+          placeholder={`pattern, in ${tildify(walking.root ?? cwd)} (empty cancels)`}
+          submitLabel="search"
+          autoFocus
+          onSubmit={(value: string) => void submitGrep($, value)}
+        />,
+      ]
+    : []
+  if (!isFocused) {
+    return [
+      ...field,
+      <Text color={C.comment} wrap="truncate-end">ctrl+x tab: explore · j k h l · g grep · e vim</Text>,
+    ]
+  }
+
+  return [
+    ...field,
+    <Box flexDirection="row" flexWrap="wrap" columnGap={2} width={width}>
+      {KEYS.map(one => (
+        <Button key={`key:${one.hotkey}`} label={one.label} hotkey={one.hotkey} plain dimColor onPress={() => void pressKey($, one.hotkey)} />
+      ))}
+    </Box>,
+  ]
+}
+
+// The last search's hits under their files, windowed to `room` around the
+// cursor; nothing with no search.
+const drawSearch = async ($: EngineInterface, e: RenderEvent, width: number, room: number) => {
+  const { Box, Text } = $.ui.resolve(e)
+  const found = await read($, search)
+  if (found === null || room < 2) return []
+  const walking = await read($, explore)
+  const isOn = walking.on === 'search'
+  const fileCount = new Set(found.hits.map(hit => hit.path)).size
+  const head = (
+    <Box flexDirection="row" justifyContent="space-between" width={width}>
+      <Box flexShrink={1}>
+        <Text wrap="truncate-end">
+          <Text color={C.purple} bold>{found.by === 'claude' ? 'claude grep ' : 'grep '}</Text>
+          <Text color={C.yellow}>{found.pattern}</Text>
+          <Text color={C.comment}>{`  in ${tildify(found.root)}`}</Text>
+        </Text>
+      </Box>
+      <Box flexShrink={0} paddingLeft={1}>
+        <Text color={found.error !== '' ? C.red : C.comment}>
+          {found.error !== '' ? 'error'
+            : `${found.hits.length}${found.isTruncated ? '+' : ''} in ${fileCount} file${fileCount === 1 ? '' : 's'}`}
+        </Text>
+      </Box>
+    </Box>
+  )
+  const rule = <Text color={C.line}>{'─'.repeat(Math.max(1, width))}</Text>
+  if (found.error !== '' || found.hits.length === 0) {
+    return [rule, head, <Text color={C.comment} wrap="truncate-end">{found.error !== '' ? found.error : 'no matches'}</Text>]
+  }
+
+  type Line = { hit?: Hit; index: number; path: string }
+  const lines: Line[] = []
+  found.hits.forEach((hit, index) => {
+    if (found.hits[index - 1]?.path !== hit.path) lines.push({ index, path: hit.path })
+    lines.push({ hit, index, path: hit.path })
+  })
+  const inner = Math.max(1, room - 2)
+  const at = lines.findIndex(line => line.hit !== undefined && line.index === found.cursor)
+  const start = Math.min(Math.max(0, at - Math.floor(inner / 2)), Math.max(0, lines.length - inner))
+  const shown = lines.slice(start, start + inner)
+  const numberWidth = String(Math.max(...found.hits.map(hit => hit.line))).length
+
+  return [
+    rule,
+    head,
+    ...shown.map(line => {
+      if (line.hit === undefined) {
+        return <Text color={C.cyan} bold wrap="truncate-end">{relative(line.path, found.root)}</Text>
+      }
+      const isCursor = isOn && line.index === found.cursor
+
+      return (
+        <Box width={width} backgroundColor={isCursor ? C.selection : undefined}>
+          <Text wrap="truncate-end">
+            <Text color={isCursor ? C.orange : C.comment}>{`  ${String(line.hit.line).padStart(numberWidth)} `}</Text>
+            <Text color={C.fg} bold={isCursor}>{line.hit.text}</Text>
+          </Text>
+        </Box>
+      )
+    }),
+  ]
+}
+
+// Claude's Grep, or a grep or rg command it ran: the same search again,
+// every matching line listed in the pane. A search of the person's that the
+// cursor is in stays.
+const showClaudeSearch = async ($: EngineInterface, e: { tool: string }) => {
+  let ask: SearchAsk | undefined
+  if (e.tool === 'Grep') {
+    const input = e as unknown as { pattern?: unknown; path?: unknown; glob?: unknown; '-i'?: unknown }
+    if (typeof input.pattern !== 'string' || input.pattern === '') return
+    ask = {
+      pattern: input.pattern,
+      path: normalize(typeof input.path === 'string' && input.path !== '' ? input.path : cwd, cwd),
+      glob: typeof input.glob === 'string' && input.glob !== '' ? input.glob : undefined,
+      ignoreCase: input['-i'] === true,
+      by: 'claude',
+    }
+  } else if (e.tool === 'Bash') {
+    const command = (e as unknown as { command?: unknown }).command
+    const found = typeof command === 'string' ? shellSearch(command, cwd, homeOf(cwd)) : undefined
+    if (found !== undefined) ask = { ...found, by: 'claude' }
+  }
+  if (ask === undefined) return
+  const walking = await read($, explore)
+  const current = await read($, search)
+  if (current?.by === 'person' && walking.on === 'search') return
+  await runSearch($, ask)
 }
 
 export const register: Register = on => {
@@ -1160,7 +1651,7 @@ export const register: Register = on => {
     roots.clear()
     await $.command.register({
       name: 'file-tree',
-      description: 'File tree of this folder: /file-tree side, /file-tree band',
+      description: 'File tree of this folder: /file-tree side, /file-tree band, /file-tree grep <pattern>',
     })
     await $.tool.register({
       name: 'plan',
@@ -1218,6 +1709,16 @@ export const register: Register = on => {
   })
 
   on('command.run', { command: 'file-tree' }, async ($, e) => {
+    const grep = /^grep\s+(.+)$/s.exec(e.args.trim())
+    if (grep?.[1] !== undefined) {
+      const walking = await read($, explore)
+      await runSearch($, { pattern: grep[1], path: walking.root ?? cwd, by: 'person' })
+      await update($, explore, (now): Explore => ({ ...now, on: 'search' }))
+      const found = await read($, search)
+      await show($, await read($, layout))
+
+      return { text: `grep ${grep[1]}: ${found?.hits.length ?? 0} lines in the file-tree pane. ctrl+x tab, then j k to walk them, e to open in vim.` }
+    }
     const asked = e.args.trim().toLowerCase()
     const current = await read($, layout)
     const wanted: Layout =
@@ -1268,6 +1769,7 @@ export const register: Register = on => {
     }
     if (tracked.length === 0) {
       const ran = await next(e)
+      void showClaudeSearch($, e).catch(() => undefined)
       if (e.tool === 'Bash') {
         // A shell command may add or remove files, or commit and switch.
         const { last } = await read($, activity)
@@ -1280,6 +1782,7 @@ export const register: Register = on => {
 
     await begin($, e.tool_use_id, tracked)
     const ran = await next(e)
+    void showClaudeSearch($, e).catch(() => undefined)
     // A shell command that exits non-zero may still have written its files.
     const isDone = ran.deny === undefined && (e.tool === 'Bash' || ran.isError !== true)
     await finish($, e.tool_use_id, tracked, isDone)
@@ -1296,11 +1799,17 @@ export const register: Register = on => {
 
     const width = e.props.bodyColumns
     const { last } = await read($, activity)
+    const walking = await read($, explore)
     const planRows = await drawPlan($, e, width, false)
     const chatRows = await drawChats($, e, width, false)
-    const gitRows = await drawGit($, e, width, last?.root ?? cwd, false)
-    const room = e.props.scroll.bodyRows - planRows.length - chatRows.length - gitRows.length
-    const { header, view, lines } = await drawTree($, e, width, room)
+    const gitRows = await drawGit($, e, width, walking.root ?? last?.root ?? cwd, false)
+    const keyRows = await drawKeys($, e, width, e.props.isFocused)
+    // The key row wraps: two lines for it in a narrow pane.
+    const keyHeight = keyRows.length + (e.props.isFocused && width < 90 ? 1 : 0)
+    const room = e.props.scroll.bodyRows - planRows.length - chatRows.length - gitRows.length - keyHeight
+    const share = walking.on === 'search' ? SEARCH_SHARE_ON : SEARCH_SHARE
+    const searchRows = await drawSearch($, e, width, Math.floor(room * share))
+    const { header, view, lines } = await drawTree($, e, width, room - searchRows.length)
 
     return (
       <Box flexDirection="column" width={width}>
@@ -1309,7 +1818,9 @@ export const register: Register = on => {
         {header}
         {view}
         {lines}
+        {searchRows}
         {gitRows}
+        {keyRows}
       </Box>
     )
   })

@@ -1,6 +1,6 @@
 {
   "name": "file-tree",
-  "version": "0.4.0",
-  "description": "A side pane or band with a live tree of the working folder: what Claude reads, writes and plans next, with the git graph, a branch switcher and the conversation's /branch tree",
+  "version": "0.5.0",
+  "description": "A side pane or band with a live tree of the working folder: what Claude reads, writes and plans next, with the git graph, a branch switcher, keys to explore, grep and open files in vim, and the conversation's /branch tree",
   "types": "./types/index.d.ts"
 }
