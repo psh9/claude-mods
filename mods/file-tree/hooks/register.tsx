@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, SessionMessage } from 'claude-code'
 
-import type { Activity, GitView, GraphLine, Layout, Op, Plan, Step, TouchedFile } from '../types'
+import type { Activity, Chat, GitView, GraphLine, Layout, Op, Plan, Step, TouchedFile } from '../types'
 
 const PANE = 'file-tree'
 const PLAN_TOOL = 'mcp__file-tree__plan'
@@ -23,6 +23,9 @@ const layout = atom({ plugin: 'file-tree', key: 'layout' } as const, 'side', {
 })
 const git = atom({ plugin: 'file-tree', key: 'git' } as const, null, {
   shape: 'git-1',
+})
+const chats = atom({ plugin: 'file-tree', key: 'chats' } as const, { current: '', nodes: [] }, {
+  shape: 'chats-1',
 })
 
 const TOOL_OPS: Record<string, Op> = {
@@ -68,6 +71,16 @@ const GIT_COMMITS = 6
 const GIT_FRESH_MS = 3000
 // Graph columns cycle through these.
 const GRAPH_COLORS = ['#7aa2f7', '#bb9af7', '#9ece6a', '#7dcfff', '#e0af68']
+// Conversation branches: kept in the store, since /branch moves the process
+// to a new session; the commands that make one; and how many the pane lists.
+const CHATS_KEY = 'chats'
+const MAX_CHATS = 200
+// Each conversation's plan, so it outlives a restart and a branch starts
+// with its parent's.
+const PLANS_KEY = 'plans'
+const MAX_PLANS = 100
+const MAX_CHAT_ROWS = 8
+const BRANCH_COMMANDS = new Set(['branch', 'fork'])
 
 // Tokyo Night (night).
 const C = {
@@ -535,6 +548,179 @@ const switchBranch = async ($: EngineInterface, root: string, name: string) => {
   $.ui.invalidate('ui.render')
 }
 
+const isChat = (one: unknown): one is Chat => {
+  const chat = one as Partial<Chat> | null
+  if (chat === null || typeof chat !== 'object') return false
+
+  return typeof chat.id === 'string' && (chat.parent === null || typeof chat.parent === 'string')
+    && typeof chat.name === 'string' && typeof chat.forkAt === 'number'
+    && typeof chat.forkText === 'string' && typeof chat.prompts === 'number'
+    && typeof chat.at === 'number'
+}
+
+// Every conversation that has a branch or is one, across sessions.
+const storedChats = async ($: EngineInterface) => {
+  const raw = await $.store.get(CHATS_KEY).catch(() => undefined)
+
+  return Array.isArray(raw) ? raw.filter(isChat) : []
+}
+
+const saveChats = ($: EngineInterface, list: Chat[]) =>
+  $.store.set(CHATS_KEY, [...list].sort((a, b) => a.at - b.at).slice(-MAX_CHATS))
+
+const rootChat = (id: string, prompts: number, at: number): Chat =>
+  ({ id, parent: null, name: 'Root', forkAt: 0, forkText: '', prompts, at })
+
+// The tree `current` belongs to, root first and each branch after its
+// parent, the earliest fork first; a conversation never branched is a root
+// alone. `prompts` is the current conversation's count now.
+const treeOf = (list: Chat[], current: string, prompts: number, at: number): Chat[] => {
+  const known = list.find(chat => chat.id === current)
+  const all = known === undefined
+    ? [...list, rootChat(current, prompts, at)]
+    : list.map(chat => (chat.id === current ? { ...chat, prompts } : chat))
+  const byId = new Map(all.map(chat => [chat.id, chat]))
+  let root = byId.get(current) ?? rootChat(current, prompts, at)
+  const climbed = new Set<string>()
+  for (let up = root.parent; up !== null && !climbed.has(up); up = root.parent) {
+    climbed.add(up)
+    const parent = byId.get(up)
+    if (parent === undefined) break
+    root = parent
+  }
+
+  const out: Chat[] = []
+  const visit = (chat: Chat) => {
+    if (out.some(one => one.id === chat.id)) return
+    out.push(chat)
+    all.filter(one => one.parent === chat.id && one.id !== chat.id)
+      .sort((a, b) => a.forkAt - b.forkAt || a.at - b.at)
+      .forEach(visit)
+  }
+  visit(root)
+
+  return out
+}
+
+// The last prompt the person typed, one line of it.
+const lastPrompt = (messages: readonly SessionMessage[]) => {
+  for (const message of [...messages].reverse()) {
+    if (message.role !== 'user' || (message.toolResults?.length ?? 0) > 0) continue
+    const line = message.text.split('\n').map(one => one.trim())
+      .find(one => one !== '' && !one.startsWith('<'))
+    if (line !== undefined) return line.slice(0, 120)
+  }
+
+  return ''
+}
+
+const isPrompt = (message: SessionMessage) =>
+  message.role === 'user' && (message.toolResults?.length ?? 0) === 0
+  && message.text.split('\n').some(line => line.trim() !== '' && !line.trim().startsWith('<'))
+
+// What /branch prints into the conversation it makes.
+const BRANCH_NOTICE = /Branched conversation(?: "([^"]*)")?\. You are now in the new branch \(session ([0-9a-f-]+)\)\. Use \/resume ([0-9a-f-]+)/
+
+// The branch `id` is, read off the notice /branch left in its transcript:
+// for a branch made while the mod was not loaded to see the command.
+const branchFromNotice = (messages: readonly SessionMessage[], id: string) => {
+  for (const [index, message] of messages.entries()) {
+    const found = BRANCH_NOTICE.exec(message.text)
+    if (found === null || found[2] !== id || found[3] === undefined) continue
+    const before = messages.slice(0, index)
+
+    return {
+      from: found[3],
+      name: found[1] ?? '',
+      forkAt: before.filter(isPrompt).length,
+      forkText: lastPrompt(before),
+    }
+  }
+
+  return undefined
+}
+
+// Conversations whose transcript was already read for a /branch notice.
+const scanned = new Set<string>()
+
+// Reads which conversation this is and how far it has got, keeps the count
+// of a stored one, and shows its tree.
+const seeChat = async ($: EngineInterface) => {
+  const id = await $.session.id()
+  const prompts = await $.session.turns()
+  const at = await $.clock.now()
+  let list = await storedChats($)
+  if (!list.some(chat => chat.id === id) && !scanned.has(id)) {
+    scanned.add(id)
+    const messages = await $.session.messages()
+    const branch = Array.isArray(messages) ? branchFromNotice(messages, id) : undefined
+    if (branch !== undefined && branch.from !== id) {
+      await branchChat($, branch.from, id, branch.forkAt, branch.forkText, branch.name)
+      list = await storedChats($)
+    }
+  }
+  const known = list.find(chat => chat.id === id)
+  if (known !== undefined && known.prompts !== prompts) {
+    await saveChats($, list.map(chat => (chat.id === id ? { ...chat, prompts } : chat)))
+  }
+  const nodes = treeOf(list, id, prompts, at)
+  await update($, chats, () => ({ current: id, nodes }))
+  await keepPlan($, id, nodes)
+}
+
+const storedPlans = async ($: EngineInterface): Promise<Record<string, Plan>> => {
+  const raw = await $.store.get(PLANS_KEY).catch(() => undefined)
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return {}
+  const out: Record<string, Plan> = {}
+  for (const [id, one] of Object.entries(raw)) {
+    const at = (one as { at?: unknown }).at
+    out[id] = { steps: stepsOf(one), at: typeof at === 'number' ? at : 0 }
+  }
+
+  return out
+}
+
+const savePlan = async ($: EngineInterface, id: string, value: Plan) => {
+  const plans = { ...(await storedPlans($)), [id]: value }
+  const kept = Object.entries(plans).sort(([, a], [, b]) => a.at - b.at).slice(-MAX_PLANS)
+  await $.store.set(PLANS_KEY, Object.fromEntries(kept))
+}
+
+// Shows the plan this conversation last had, else the nearest parent's; a
+// plan shown before any was stored (an older version's) is stored for it.
+const keepPlan = async ($: EngineInterface, id: string, nodes: Chat[]) => {
+  const plans = await storedPlans($)
+  const shown = await read($, plan)
+  if (plans[id] === undefined && shown.steps.length > 0) {
+    await savePlan($, id, shown)
+
+    return
+  }
+  if (shown.steps.length > 0) return
+  const byId = new Map(nodes.map(chat => [chat.id, chat]))
+  const climbed = new Set<string>()
+  for (let at: string | null = id; at !== null && !climbed.has(at); at = byId.get(at)?.parent ?? null) {
+    climbed.add(at)
+    const found = plans[at]
+    if (found !== undefined) {
+      if (found.steps.length > 0) await update($, plan, () => found)
+
+      return
+    }
+  }
+}
+
+// A /branch moves the process to a new conversation holding a copy of this
+// one: the new one is stored as a branch of this, made after its last prompt.
+const branchChat = async ($: EngineInterface, from: string, to: string, forkAt: number, forkText: string, asked: string) => {
+  const at = await $.clock.now()
+  const list = (await storedChats($)).filter(chat => chat.id !== to)
+  const tree = treeOf(list, from, forkAt, at)
+  const parent = list.some(chat => chat.id === from) ? [] : [rootChat(from, forkAt, at)]
+  const name = asked !== '' ? asked.slice(0, 40) : `branch ${tree.length}`
+  await saveChats($, [...list, ...parent, { id: to, parent: from, name, forkAt, forkText, prompts: forkAt, at }])
+}
+
 const walk = async (
   $: EngineInterface,
   dir: string,
@@ -655,6 +841,97 @@ const drawPlan = async ($: EngineInterface, e: RenderEvent, width: number, isCom
         </Text>
       </Box>
     )),
+    <Text color={C.line}>{'─'.repeat(Math.max(1, width))}</Text>,
+  ]
+}
+
+// The conversation's /branch tree: a row per conversation under its parent,
+// with how many prompts it shares with the parent and the prompt it forked
+// after; the path from the root to this one when `isCompact`.
+const drawChats = async ($: EngineInterface, e: RenderEvent, width: number, isCompact: boolean) => {
+  const { Box, Text } = $.ui.resolve(e)
+  const { current, nodes } = await read($, chats)
+  const here = nodes.find(chat => chat.id === current)
+  if (here === undefined) return []
+  const count = (n: number) => `${n} prompt${n === 1 ? '' : 's'}`
+  const branches = nodes.length - 1
+
+  if (isCompact) {
+    const path: Chat[] = []
+    for (let at: Chat | undefined = here; at !== undefined && !path.includes(at); at = nodes.find(chat => chat.id === at?.parent)) {
+      path.unshift(at)
+    }
+
+    return [
+      <Text wrap="truncate-end">
+        <Text color={C.purple} bold>chat </Text>
+        {path.map((chat, index) => (
+          <Text color={chat === here ? C.green : C.comment} bold={chat === here}>
+            {`${index > 0 ? ' › ' : ''}${chat.name}`}
+          </Text>
+        ))}
+        {here.parent !== null && <Text color={C.comment}>{`  shares ${here.forkAt} of ${count(here.prompts)}`}</Text>}
+        {branches > 0 && <Text color={C.comment}>{`  ${branches} branch${branches === 1 ? '' : 'es'}`}</Text>}
+      </Text>,
+    ]
+  }
+
+  type Line = { chat: Chat; lead: string; under: string }
+  const lines: Line[] = []
+  const visit = (chat: Chat, indent: string, isRoot: boolean, isLast: boolean) => {
+    const kids = nodes.filter(one => one.parent === chat.id)
+    const inner = isRoot ? '' : indent + (isLast ? '  ' : '│ ')
+    lines.push({
+      chat,
+      lead: isRoot ? '' : indent + (isLast ? '└ ' : '├ '),
+      under: inner + (kids.length > 0 ? '│ ' : '  '),
+    })
+    kids.forEach((kid, index) => visit(kid, inner, false, index === kids.length - 1))
+  }
+  const root = nodes[0]
+  if (root !== undefined) visit(root, '', true, true)
+  // Past the cap, the rows nearest this conversation stay.
+  const at = lines.findIndex(line => line.chat === here)
+  const start = Math.min(Math.max(0, at - Math.floor(MAX_CHAT_ROWS / 2)), Math.max(0, lines.length - MAX_CHAT_ROWS))
+  const shown = lines.slice(start, start + MAX_CHAT_ROWS)
+  const left = lines.length - shown.length
+
+  const rows = shown.flatMap(({ chat, lead, under }) => {
+    const isHere = chat === here
+    const row = (
+      <Box flexDirection="row" justifyContent="space-between" width={width} backgroundColor={isHere ? C.cursorLine : undefined}>
+        <Box flexShrink={1}>
+          <Text wrap="truncate-end">
+            <Text color={C.line}>{lead}</Text>
+            <Text color={isHere ? C.green : C.comment}>{isHere ? '● ' : '○ '}</Text>
+            <Text color={isHere ? C.green : C.fg} bold={isHere}>{chat.name}</Text>
+            {isHere && <Text color={C.comment} italic>  here</Text>}
+          </Text>
+        </Box>
+        <Box flexShrink={0} paddingLeft={1}>
+          <Text color={C.comment}>
+            {chat.parent === null ? count(chat.prompts) : `shares ${chat.forkAt} · ${count(chat.prompts)}`}
+          </Text>
+        </Box>
+      </Box>
+    )
+    if (chat.parent === null || chat.forkText === '') return [row]
+
+    return [
+      row,
+      <Text wrap="truncate-end">
+        <Text color={C.line}>{under}</Text>
+        <Text color={C.comment} italic>{`⑂ after "${chat.forkText}"`}</Text>
+      </Text>,
+    ]
+  })
+
+  return [
+    <Text color={C.purple} bold>
+      {`chats${branches > 0 ? `  ${branches} branch${branches === 1 ? '' : 'es'}` : ''}`}
+    </Text>,
+    ...rows,
+    ...(left > 0 ? [<Text color={C.comment}>{`${left} more`}</Text>] : []),
     <Text color={C.line}>{'─'.repeat(Math.max(1, width))}</Text>,
   ]
 }
@@ -912,8 +1189,32 @@ export const register: Register = on => {
     await update($, layout, () => start)
     if (start === 'side') void $.ui.open({ id: PANE, title: 'Files' })
     await refreshGit($, cwd, true)
+    await seeChat($).catch(() => undefined)
 
     return next(e)
+  })
+
+  // /branch: the conversation before is the parent, the one after the branch.
+  on('command.run', async ($, e, next) => {
+    if (!BRANCH_COMMANDS.has(e.command)) return next(e)
+    const from = await $.session.id()
+    const forkAt = await $.session.turns()
+    const messages = await $.session.messages()
+    const forkText = Array.isArray(messages) ? lastPrompt(messages) : ''
+    const ran = await next(e)
+    const to = await $.session.id()
+    if (to !== from) await branchChat($, from, to, forkAt, forkText, e.args.trim())
+    await seeChat($)
+
+    return ran
+  }).catch(($, e, next) => next(e))
+
+  // Counts the prompt just answered; and a /clear starts another conversation.
+  on('turn.complete', async ($, e, next) => {
+    const done = await next(e)
+    if (e.agentId === undefined) await seeChat($).catch(() => undefined)
+
+    return done
   })
 
   on('command.run', { command: 'file-tree' }, async ($, e) => {
@@ -938,6 +1239,8 @@ export const register: Register = on => {
     const steps = stepsOf(e)
     const at = await $.clock.now()
     await update($, plan, () => ({ steps, at }))
+    const id = await $.session.id().catch(() => '')
+    if (id !== '') await savePlan($, id, { steps, at }).catch(() => undefined)
     const text = steps.length === 0
       ? 'Plan cleared from the file-tree pane.'
       : `Plan shown in the file-tree pane: ${steps.length} steps.`
@@ -994,13 +1297,15 @@ export const register: Register = on => {
     const width = e.props.bodyColumns
     const { last } = await read($, activity)
     const planRows = await drawPlan($, e, width, false)
+    const chatRows = await drawChats($, e, width, false)
     const gitRows = await drawGit($, e, width, last?.root ?? cwd, false)
-    const room = e.props.scroll.bodyRows - planRows.length - gitRows.length
+    const room = e.props.scroll.bodyRows - planRows.length - chatRows.length - gitRows.length
     const { header, view, lines } = await drawTree($, e, width, room)
 
     return (
       <Box flexDirection="column" width={width}>
         {planRows}
+        {chatRows}
         {header}
         {view}
         {lines}
@@ -1018,8 +1323,9 @@ export const register: Register = on => {
     const columnWidth = Math.floor(width / columns) - 1
     const { last } = await read($, activity)
     const planRows = await drawPlan($, e, width, true)
+    const chatRows = await drawChats($, e, width, true)
     const gitRows = await drawGit($, e, width, last?.root ?? cwd, true)
-    const perColumn = Math.max(3, e.props.scroll.bodyRows - 2 - planRows.length - gitRows.length)
+    const perColumn = Math.max(3, e.props.scroll.bodyRows - 2 - planRows.length - chatRows.length - gitRows.length)
     const { header, view, lines } = await drawTree($, e, columnWidth, perColumn * columns + 1)
     const height = Math.max(1, Math.ceil(view.length / columns))
     const stacks = Array.from({ length: columns }, (_, index) =>
@@ -1029,6 +1335,7 @@ export const register: Register = on => {
     return (
       <Box flexDirection="column" width={width}>
         {planRows}
+        {chatRows}
         <Box width={Math.min(width, columnWidth * 2)}>{header}</Box>
         <Box flexDirection="row" columnGap={1}>
           {stacks.map(stack => (

@@ -49,6 +49,24 @@ export type GitView = {
   at: number
 }
 
+// One conversation of a /branch tree: the root, or a branch made from
+// `parent` after its `forkAt`th prompt. Everything up to there is context the
+// two share.
+export type Chat = {
+  id: string
+  parent: string | null
+  name: string
+  forkAt: number
+  // The last prompt before the fork.
+  forkText: string
+  // Prompts in the conversation when it was last seen, shared ones included.
+  prompts: number
+  at: number
+}
+
+// The /branch tree the current conversation belongs to, root first.
+export type Chats = { current: string; nodes: Chat[] }
+
 declare module 'claude-code' {
   interface PluginState {
     'file-tree': {
@@ -56,6 +74,7 @@ declare module 'claude-code' {
       activity: Shaped<Activity>
       plan: Shaped<Plan>
       git: Shaped<GitView | null>
+      chats: Shaped<Chats>
       layout: Shaped<Layout>
     }
   }

@@ -1,6 +1,6 @@
 # file-tree
 
-A pane beside the chat (or a band above the prompt) with a tree of the folder Claude is working in, styled after nvim-tree with Tokyo Night colors. It follows Claude as it works: what it reads, what it writes, where it goes, what it plans to do next, and where the repository stands in git.
+A pane beside the chat (or a band above the prompt) with a tree of the folder Claude is working in, styled after nvim-tree with Tokyo Night colors. It follows Claude as it works: what it reads, what it writes, where it goes, what it plans to do next, where the repository stands in git, and how the conversation has branched with `/branch`.
 
 ## Screenshots
 
@@ -96,6 +96,30 @@ When Claude lays out steps, it calls the mod's `plan` tool and the steps show ab
 | `✓` (struck through) | a step done; the last two stay in view |
 
 In the band layout the plan is one line: `next ▸ Commit to main  ○ Push ...`.
+
+### Chats
+
+Under the plan, the conversation's branches. A conversation never branched is `Root` alone. Each `/branch` (or `/fork`) adds the new conversation under the one it came from:
+
+```
+chats  2 branches
+○ Root                              7 prompts
+├ ○ try-a                   shares 3 · 5 prompts
+│   ⑂ after "create a new branch and build the feature"
+└ ● try-b  here             shares 5 · 6 prompts
+    ⑂ after "now the README"
+```
+
+| Part | Means |
+| --- | --- |
+| `●` (green) `here` | the conversation this session is in |
+| `○` | another conversation of the same tree |
+| `├ └ │` | which conversation a branch was made from |
+| `shares 3` | the branch was made after the parent's 3rd prompt: those 3 prompts and their answers are context both hold |
+| `5 prompts` | prompts in the conversation, the shared ones included, as of the last time it was open |
+| `⑂ after "..."` | the last prompt before the fork |
+
+A branch is named by what follows `/branch` (`/branch try-a`), else `branch 1`, `branch 2`, ... The tree is kept across sessions, so resuming any conversation of it (`claude --resume`) shows the whole tree again. In the band layout it is one line: `chat Root › try-b  shares 5 of 6 prompts  2 branches`.
 
 ### Footer
 
