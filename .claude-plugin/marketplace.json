@@ -1,0 +1,11 @@
+{
+  "name": "claude-mods",
+  "owner": { "name": "psh9" },
+  "plugins": [
+    {
+      "name": "file-tree",
+      "source": "./mods/file-tree",
+      "description": "A side pane or band with a tree of the working folder, showing the files Claude reads and writes as it works"
+    }
+  ]
+}
