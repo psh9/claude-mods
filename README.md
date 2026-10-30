@@ -32,6 +32,17 @@ From a shell:
 claude plugin install file-tree --marketplace psh9/claude-mods
 ```
 
+## Updating
+
+Claude Code keeps a copy of each mod, and it only replaces that copy when the mod's version number goes up. So every change to a mod comes with a bump of its `version` in `mods/<mod>/.claude-plugin/plugin.json`. To get the latest release:
+
+```
+claude plugin marketplace update claude-mods
+claude plugin update file-tree@claude-mods
+```
+
+Then restart the Claude Code session so the new code loads. To confirm the version, run `claude plugin list`: it shows the installed version next to each plugin. The mod's README has the details of what each release changes.
+
 ## Developing
 
 Each mod is a folder under `mods/`, listed in `.claude-plugin/marketplace.json`. Run one from its folder with `claude --plugin-dir mods/<mod>`, check it with `claude plugin validate mods/<mod>`, and run its tests with `claude plugin test mods/<mod>`.

@@ -192,6 +192,17 @@ Keys (Control, not Cmd, on a Mac):
 
 The side pane docks beside the chat in fullscreen mode (`"tui": "fullscreen"` in settings) on a terminal at least 110 columns wide; otherwise it shows above the prompt.
 
+## Updating
+
+To move an installed copy to the latest version, from any Claude Code session:
+
+```
+claude plugin marketplace update claude-mods
+claude plugin update file-tree@claude-mods
+```
+
+Restart the session afterwards. `claude plugin update` does nothing when the version number is unchanged, so a new release always raises `version` in `.claude-plugin/plugin.json`. Check the installed version with `claude plugin list`. A new install is the same as an update: `claude plugin install file-tree --marketplace psh9/claude-mods`.
+
 ## Requirements
 
 Claude Code with plugin hook modules (2.1.314 or later). macOS or Linux: paths are handled with `/`. `git` on the PATH for the git section.
