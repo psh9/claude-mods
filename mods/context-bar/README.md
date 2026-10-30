@@ -8,6 +8,8 @@ ctx 38% 75.1k/200k $0.42 ██████░░░░░░░░░░░░�
 
 The bar is the last row above the prompt. Its figures are the window's percentage, the tokens used against the window's size, and the session's cost when the host keeps a ledger.
 
+A two-row pixel robot stands at the end of the bar and steps its legs with each reading from the engine, so it walks along as the conversation grows.
+
 ## Commands
 
 | Command | Does |

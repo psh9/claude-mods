@@ -330,3 +330,34 @@ test('/context-bar full reports the spend beside the count', async ($, on) => {
   const ran = await typed($, 'full')
   expect(ran.text).toContain('$0.42')
 })
+
+test('the robot steps its legs with each reading', async ($, on) => {
+  let total = 75100
+  beneath(on, () => {
+    const base = usage()
+
+    return {
+      ...base,
+      context: { ...base.context, breakdown: { ...base.context.breakdown!, totalTokens: total } },
+    }
+  })
+  await started($)
+
+  const legs = async () => {
+    const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+    const row = await ui.find({ type: 'Text', text: /^(▀█ ██ █▀|█▀▄▀▀▄▀█)$/ })
+    await ui.unmount()
+
+    return row?.text
+  }
+
+  const before = await legs()
+  expect(before).toBeDefined()
+
+  total = 80000
+  await $.session.measure({ context: { tokens: total, window: 200000, percent: 40 }, rateLimits: [], changed: ['context'] })
+
+  const after = await legs()
+  expect(after).toBeDefined()
+  expect(after).not.toBe(before)
+})

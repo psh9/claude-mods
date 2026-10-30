@@ -6,12 +6,23 @@ import type { ContextRow, ContextSnapshot } from '../types'
 const snapshot = atom({ plugin: 'context-bar', key: 'snapshot' } as const, null)
 const isShown = atom({ plugin: 'context-bar', key: 'isShown' } as const, true)
 const hasLegend = atom({ plugin: 'context-bar', key: 'hasLegend' } as const, true)
+const step = atom({ plugin: 'context-bar', key: 'step' } as const, 0)
 
 const FILLED = '█'
 const HOLLOW = '░'
 
 /** Most cells the bar takes: wide enough to read each category's share. */
 const BAR_CELLS = 48
+
+/**
+ * A robot with an antenna and a visor, two text rows tall, beside the bar. Each
+ * reading swaps to the next frame, so its legs step as the window fills.
+ */
+const ROBOT = [
+  [' ▄▄█▄▄▄ ', '▀█ ██ █▀'],
+  [' ▄▄█▄▄▄ ', '█▀▄▀▀▄▀█'],
+] as const
+const ROBOT_WIDTH = 8
 
 /** The colour of the fill percentage: calm, then warning, then near the limit. */
 const fillColour = (percent: number): string =>
@@ -120,7 +131,10 @@ async function refresh(
   } catch {
     return null
   }
-  if (taken !== null) await update($, snapshot, () => taken)
+  if (taken !== null) {
+    await update($, snapshot, () => taken)
+    await update($, step, value => value + 1)
+  }
 
   return taken
 }
@@ -187,7 +201,11 @@ export const register: Register = on => {
     const spent = taken.costUsd === undefined ? '' : ` ${money(taken.costUsd)}`
     const head = `ctx ${String(Math.round(taken.percent)).padStart(3)}%`
     const figures = ` ${human(taken.total)}/${human(taken.max)}${spent}`
-    const cells = Math.min(BAR_CELLS, Math.max(8, width - head.length - figures.length - 1))
+    const cells = Math.min(
+      BAR_CELLS,
+      Math.max(8, width - head.length - figures.length - 1 - ROBOT_WIDTH - 1),
+    )
+    const frame = ROBOT[(await read($, step)) % ROBOT.length]
     const bar = allocate(taken.rows, cells)
       .filter(segment => segment.cells > 0)
       .map(({ row, cells: count }) => (
@@ -219,13 +237,21 @@ export const register: Register = on => {
       if (keys.length > 0) legend.push(<Box key="legend">{keys}</Box>)
     }
 
+    // The robot is two rows tall; the row aligned to the bottom keeps its feet
+    // on the bar, with its antenna in the row above.
     return (
-      <Box flexDirection="column">
-        {legend}
-        <Box key="bar">
-          <Text color={fillColour(taken.percent)} bold>{head}</Text>
-          <Text dimColor>{figures} </Text>
-          {bar}
+      <Box flexDirection="row" alignItems="flex-end">
+        <Box flexDirection="column" flexGrow={1}>
+          {legend}
+          <Box key="bar">
+            <Text color={fillColour(taken.percent)} bold>{head}</Text>
+            <Text dimColor>{figures} </Text>
+            {bar}
+          </Box>
+        </Box>
+        <Box flexDirection="column" marginLeft={1}>
+          <Text color="permission">{frame[0]}</Text>
+          <Text color="permission">{frame[1]}</Text>
         </Box>
       </Box>
     )

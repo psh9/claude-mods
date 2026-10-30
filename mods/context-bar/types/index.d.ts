@@ -26,6 +26,8 @@ declare module 'claude-code' {
       snapshot: ContextSnapshot | null
       isShown: boolean
       hasLegend: boolean
+      /** Counts the readings taken, so the runner takes its next step. */
+      step: number
     }
   }
 }
