@@ -31,9 +31,29 @@ const usage = (hasBreakdown = true, usd: number | null = 0.42): SessionUsage => 
           percentage: 38,
           gridRows: [],
           model: 'claude-opus-5',
-          memoryFiles: [],
-          mcpTools: [],
-          agents: [],
+          memoryFiles: [
+            { path: '/repo/CLAUDE.md', type: 'Project', tokens: 5200 },
+            { path: '/home/me/.claude/CLAUDE.md', type: 'User', tokens: 1900 },
+          ],
+          mcpTools: [
+            { name: 'mcp__linear__create_issue', serverName: 'linear', tokens: 900, isLoaded: true },
+            { name: 'mcp__linear__list_issues', serverName: 'linear', tokens: 700, isLoaded: true },
+            { name: 'mcp__figma__use_figma', serverName: 'figma', tokens: 2600, isLoaded: true },
+            { name: 'mcp__figma__get_screenshot', serverName: 'figma', tokens: 400, isLoaded: false },
+          ],
+          agents: [{ agentType: 'reviewer', source: 'projectSettings', tokens: 120 }],
+          skills: {
+            totalSkills: 9,
+            includedSkills: 8,
+            tokens: 9900,
+            skillFrontmatter: [
+              { name: 'pdf', source: 'plugin', pluginName: 'anthropic-skills', tokens: 600 },
+              { name: 'deep-research', source: 'plugin', pluginName: 'anthropic-skills', tokens: 4100 },
+              { name: 'loop', source: 'built-in', tokens: 300 },
+              ...['a', 'b', 'c', 'd', 'e'].map(name => ({ name, source: 'userSettings', tokens: 980 })),
+            ],
+          },
+          slashCommands: { totalCommands: 12, includedCommands: 12, tokens: 800 },
           isAutoCompactEnabled: true,
           apiUsage: null,
         }
@@ -331,33 +351,72 @@ test('/context-bar full reports the spend beside the count', async ($, on) => {
   expect(ran.text).toContain('$0.42')
 })
 
-test('the robot steps its legs with each reading', async ($, on) => {
-  let total = 75100
-  beneath(on, () => {
-    const base = usage()
-
-    return {
-      ...base,
-      context: { ...base.context, breakdown: { ...base.context.breakdown!, totalTokens: total } },
-    }
-  })
+test('/context-bar skills lists every skill, heaviest first', async ($, on) => {
+  beneath(on)
   await started($)
 
-  const legs = async () => {
-    const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
-    const row = await ui.find({ type: 'Text', text: /^(▀█ ██ █▀|█▀▄▀▀▄▀█)$/ })
-    await ui.unmount()
+  const ran = await typed($, 'skills')
+  const lines = ran.text!.split('\n')
+  expect(lines[0]).toBe('Skills — 9.9k')
+  expect(lines[1]).toContain('4.1k  anthropic-skills:deep-research  (plugin)')
+  expect(lines[2]).toContain('980  a')
+  expect(ran.text).toContain('300  loop  (built-in)')
+  expect(ran.text).toContain('1 of 9 skills left out')
+  expect(ran.text).toContain('slash commands: 12 listed, 800')
+})
 
-    return row?.text
+test('/context-bar mcp sums loaded schemas per server', async ($, on) => {
+  beneath(on)
+  await started($)
+
+  const ran = await typed($, 'mcp')
+  expect(ran.text).toContain('MCP tools, by server — 4.2k')
+  expect(ran.text).toContain('2.6k  figma  (1 tool, 1 deferred)')
+  expect(ran.text).toContain('1.6k  linear  (2 tools)')
+  expect(ran.text!.indexOf('figma')).toBeLessThan(ran.text!.indexOf('linear'))
+})
+
+test('/context-bar memory and agents name each file and agent', async ($, on) => {
+  beneath(on)
+  await started($)
+
+  const memory = await typed($, 'memory')
+  expect(memory.text).toContain('Memory files — 7.1k')
+  expect(memory.text).toContain('5.2k  /repo/CLAUDE.md  (Project)')
+
+  const agents = await typed($, 'agents')
+  expect(agents.text).toContain('120  reviewer  (projectSettings)')
+})
+
+test('/context-bar full shows each section, its heaviest items folded', async ($, on) => {
+  beneath(on)
+  await started($)
+
+  const ran = await typed($, 'full')
+  for (const title of ['Skills', 'Memory files', 'MCP tools, by server', 'Custom agents']) {
+    expect(ran.text).toContain(title)
   }
+  // Eight skills, five shown.
+  expect(ran.text).toContain('3 more')
+})
 
-  const before = await legs()
-  expect(before).toBeDefined()
+test('/context-bar categories lists every /context row, deferred last', async ($, on) => {
+  beneath(on)
+  await started($)
 
-  total = 80000
-  await $.session.measure({ context: { tokens: total, window: 200000, percent: 40 }, rateLimits: [], changed: ['context'] })
+  const ran = await typed($, 'categories')
+  const lines = ran.text!.split('\n')
+  expect(lines[0]).toBe('Context — 75.1k of 200k (claude-opus-5)')
+  expect(lines[1]).toBe('    2.4k  System prompt         1.2%')
+  expect(lines[2]).toBe('   11.5k  System tools          5.8%')
+  expect(ran.text).toContain('26.0k  Messages')
+  expect(lines[lines.length - 1]).toMatch(/Deferred tools +loaded on demand, not counted$/)
+})
 
-  const after = await legs()
-  expect(after).toBeDefined()
-  expect(after).not.toBe(before)
+test('/context-bar full leads with the category table', async ($, on) => {
+  beneath(on)
+  await started($)
+
+  const ran = await typed($, 'full')
+  expect(ran.text!.indexOf('System tools')).toBeLessThan(ran.text!.indexOf('Skills —'))
 })

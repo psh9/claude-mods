@@ -1,28 +1,17 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, SessionContextBreakdown } from 'claude-code'
 
 import type { ContextRow, ContextSnapshot } from '../types'
 
 const snapshot = atom({ plugin: 'context-bar', key: 'snapshot' } as const, null)
 const isShown = atom({ plugin: 'context-bar', key: 'isShown' } as const, true)
 const hasLegend = atom({ plugin: 'context-bar', key: 'hasLegend' } as const, true)
-const step = atom({ plugin: 'context-bar', key: 'step' } as const, 0)
 
 const FILLED = '█'
 const HOLLOW = '░'
 
 /** Most cells the bar takes: wide enough to read each category's share. */
 const BAR_CELLS = 48
-
-/**
- * A robot with an antenna and a visor, two text rows tall, beside the bar. Each
- * reading swaps to the next frame, so its legs step as the window fills.
- */
-const ROBOT = [
-  [' ▄▄█▄▄▄ ', '▀█ ██ █▀'],
-  [' ▄▄█▄▄▄ ', '█▀▄▀▀▄▀█'],
-] as const
-const ROBOT_WIDTH = 8
 
 /** The colour of the fill percentage: calm, then warning, then near the limit. */
 const fillColour = (percent: number): string =>
@@ -90,7 +79,7 @@ const allocate = (rows: ContextRow[], cells: number): Segment[] => {
 const measure = async (
   $: EngineInterface,
   detail: 'summary' | 'full',
-): Promise<ContextSnapshot | null> => {
+): Promise<{ taken: ContextSnapshot; breakdown: SessionContextBreakdown } | null> => {
   const usage = await $.session.usage({ breakdown: detail })
   const breakdown = usage.context.breakdown
   if (breakdown === undefined) return null
@@ -105,7 +94,7 @@ const measure = async (
     }))
     .sort((a, b) => RANK[a.kind] - RANK[b.kind])
 
-  return {
+  const taken: ContextSnapshot = {
     rows,
     total: breakdown.totalTokens,
     max: breakdown.rawMaxTokens || breakdown.maxTokens,
@@ -114,29 +103,137 @@ const measure = async (
     model: breakdown.model,
     costUsd: usage.cost?.usd,
   }
+
+  return { taken, breakdown }
+}
+
+/** The lists /context prints beneath its grid, each one itemised. */
+const SECTIONS = ['skills', 'memory', 'mcp', 'agents'] as const
+type Section = (typeof SECTIONS)[number]
+
+/** One itemised line: what it is, what it costs, and where it came from. */
+type Item = { name: string; tokens: number; note?: string }
+
+type Itemised = { title: string; tokens: number; items: Item[]; footnote?: string }
+
+/** Each section's items, heaviest first, from a breakdown the engine gave. */
+const itemise = (breakdown: SessionContextBreakdown, section: Section): Itemised => {
+  const heaviest = (items: Item[]) => [...items].sort((a, b) => b.tokens - a.tokens)
+  const sum = (items: { tokens: number }[]) => items.reduce((total, item) => total + item.tokens, 0)
+
+  if (section === 'skills') {
+    const skills = breakdown.skills
+    const items = (skills?.skillFrontmatter ?? []).map(skill => ({
+      name: skill.pluginName && !skill.name.includes(':') ? `${skill.pluginName}:${skill.name}` : skill.name,
+      tokens: skill.tokens,
+      note: skill.source,
+    }))
+    const commands = breakdown.slashCommands
+
+    return {
+      title: 'Skills',
+      tokens: skills?.tokens ?? sum(items),
+      items: heaviest(items),
+      footnote: [
+        skills && skills.includedSkills < skills.totalSkills
+          ? `${skills.totalSkills - skills.includedSkills} of ${skills.totalSkills} skills left out of the listing's budget`
+          : undefined,
+        commands
+          ? `slash commands: ${commands.includedCommands} listed, ${human(commands.tokens)}`
+          : undefined,
+      ].filter(Boolean).join('; ') || undefined,
+    }
+  }
+
+  if (section === 'memory') {
+    const items = breakdown.memoryFiles.map(file => ({ name: file.path, tokens: file.tokens, note: file.type }))
+
+    return { title: 'Memory files', tokens: sum(items), items: heaviest(items) }
+  }
+
+  if (section === 'agents') {
+    const items = breakdown.agents.map(agent => ({ name: agent.agentType, tokens: agent.tokens, note: agent.source }))
+
+    return { title: 'Custom agents', tokens: sum(items), items: heaviest(items) }
+  }
+
+  // MCP tools add up per server; a schema not loaded yet is outside the window.
+  const servers = new Map<string, { tokens: number; tools: number; waiting: number }>()
+  for (const tool of breakdown.mcpTools) {
+    const server = servers.get(tool.serverName) ?? { tokens: 0, tools: 0, waiting: 0 }
+    if (tool.isLoaded) {
+      server.tokens += tool.tokens
+      server.tools += 1
+    } else {
+      server.waiting += 1
+    }
+    servers.set(tool.serverName, server)
+  }
+  const items = [...servers].map(([name, server]) => ({
+    name,
+    tokens: server.tokens,
+    note: `${server.tools} tool${server.tools === 1 ? '' : 's'}${server.waiting ? `, ${server.waiting} deferred` : ''}`,
+  }))
+
+  return { title: 'MCP tools, by server', tokens: sum(items), items: heaviest(items) }
 }
 
 /**
- * Measures the window and keeps it, for the band to draw. A reading the
+ * Every row /context prints, in the window's order: what is spent, the
+ * reserve, the room left, then deferred schemas, which the total leaves out.
+ */
+const overview = (breakdown: SessionContextBreakdown): string => {
+  const max = breakdown.rawMaxTokens || breakdown.maxTokens
+  const share = (tokens: number) => (max > 0 ? `${((tokens / max) * 100).toFixed(1)}%` : '')
+  const rows = [...breakdown.categories].sort((a, b) => RANK[a.kind] - RANK[b.kind])
+  const lines = [`Context — ${human(breakdown.totalTokens)} of ${human(max)} (${breakdown.model})`]
+  const width = Math.max(...rows.map(row => row.name.length))
+  for (const row of rows) {
+    const note = row.kind === 'deferred' ? 'loaded on demand, not counted' : share(row.tokens).padStart(6)
+    lines.push(`  ${human(row.tokens).padStart(6)}  ${row.name.padEnd(width)}  ${note}`)
+  }
+
+  return lines.join('\n')
+}
+
+/** A section as text: its total, then one line per item, `limit` at most. */
+const report = (section: Itemised, limit = Infinity): string => {
+  const lines = [`${section.title} — ${human(section.tokens)}`]
+  if (section.items.length === 0) lines.push('  (none)')
+  for (const item of section.items.slice(0, limit)) {
+    lines.push(`  ${human(item.tokens).padStart(6)}  ${item.name}${item.note ? `  (${item.note})` : ''}`)
+  }
+  const rest = section.items.slice(limit)
+  if (rest.length > 0) {
+    lines.push(`  ${'…'.padStart(6)}  ${rest.length} more, ${human(rest.reduce((total, item) => total + item.tokens, 0))}`)
+  }
+  if (section.footnote) lines.push(`  ${section.footnote}`)
+
+  return lines.join('\n')
+}
+
+/**
+ * Measures the window and keeps it, for the band to draw, handing back the
+ * engine's breakdown for the commands that itemise it. A reading the
  * engine cannot give (no session bound yet) leaves the last one standing
  * rather than failing the hook that asked.
  */
 async function refresh(
   $: EngineInterface,
   detail: 'summary' | 'full' = 'summary',
-): Promise<ContextSnapshot | null> {
-  let taken: ContextSnapshot | null = null
+): Promise<{ taken: ContextSnapshot; breakdown: SessionContextBreakdown } | null> {
+  let measured: Awaited<ReturnType<typeof measure>> = null
   try {
-    taken = await measure($, detail)
+    measured = await measure($, detail)
   } catch {
     return null
   }
-  if (taken !== null) {
+  if (measured !== null) {
+    const { taken } = measured
     await update($, snapshot, () => taken)
-    await update($, step, value => value + 1)
   }
 
-  return taken
+  return measured
 }
 
 export const register: Register = on => {
@@ -144,7 +241,7 @@ export const register: Register = on => {
     await $.command.register({
       name: 'context-bar',
       description: 'Toggle the context-window bar above the prompt',
-      argumentHint: 'on | off | full | legend',
+      argumentHint: 'on | off | full | legend | categories | skills | memory | mcp | agents',
     })
     await refresh($)
 
@@ -161,16 +258,28 @@ export const register: Register = on => {
   on('command.run', { command: 'context-bar' }, async ($, e) => {
     const arg = e.args.trim().toLowerCase()
 
-    if (arg === 'full') {
-      const taken = await refresh($, 'full')
+    const section = SECTIONS.find(name => name === arg)
+    if (arg === 'full' || arg === 'categories' || section !== undefined) {
+      const measured = await refresh($, 'full')
+      if (measured === null) {
+        return { text: 'No window to measure yet — the bar fills in after the first response.' }
+      }
+      const { taken, breakdown } = measured
+
+      // One section in full, or every section's heaviest items under the total.
+      if (section !== undefined) return { text: report(itemise(breakdown, section)) }
+      if (arg === 'categories') return { text: overview(breakdown) }
       await update($, isShown, () => true)
 
       return {
-        text: taken === null
-          ? 'No window to measure yet — the bar fills in after the first response.'
-          : `Context bar counted exactly: ${human(taken.total)} of ${human(taken.max)} used (${Math.round(taken.percent)}%)${
-              taken.costUsd === undefined ? '' : `, ${money(taken.costUsd)} spent this session`
-            }.`,
+        text: [
+          `Context bar counted exactly: ${human(taken.total)} of ${human(taken.max)} used (${Math.round(taken.percent)}%)${
+            taken.costUsd === undefined ? '' : `, ${money(taken.costUsd)} spent this session`
+          }.`,
+          overview(breakdown),
+          ...SECTIONS.map(name => report(itemise(breakdown, name), 5)),
+          'Run /context-bar skills, memory, mcp or agents for every item. System prompt, system tools and messages come as totals only: the engine does not itemise them.',
+        ].join('\n\n'),
       }
     }
 
@@ -201,11 +310,7 @@ export const register: Register = on => {
     const spent = taken.costUsd === undefined ? '' : ` ${money(taken.costUsd)}`
     const head = `ctx ${String(Math.round(taken.percent)).padStart(3)}%`
     const figures = ` ${human(taken.total)}/${human(taken.max)}${spent}`
-    const cells = Math.min(
-      BAR_CELLS,
-      Math.max(8, width - head.length - figures.length - 1 - ROBOT_WIDTH - 1),
-    )
-    const frame = ROBOT[(await read($, step)) % ROBOT.length]
+    const cells = Math.min(BAR_CELLS, Math.max(8, width - head.length - figures.length - 1))
     const bar = allocate(taken.rows, cells)
       .filter(segment => segment.cells > 0)
       .map(({ row, cells: count }) => (
@@ -237,21 +342,13 @@ export const register: Register = on => {
       if (keys.length > 0) legend.push(<Box key="legend">{keys}</Box>)
     }
 
-    // The robot is two rows tall; the row aligned to the bottom keeps its feet
-    // on the bar, with its antenna in the row above.
     return (
-      <Box flexDirection="row" alignItems="flex-end">
-        <Box flexDirection="column" flexGrow={1}>
-          {legend}
-          <Box key="bar">
-            <Text color={fillColour(taken.percent)} bold>{head}</Text>
-            <Text dimColor>{figures} </Text>
-            {bar}
-          </Box>
-        </Box>
-        <Box flexDirection="column" marginLeft={1}>
-          <Text color="permission">{frame[0]}</Text>
-          <Text color="permission">{frame[1]}</Text>
+      <Box flexDirection="column">
+        {legend}
+        <Box key="bar">
+          <Text color={fillColour(taken.percent)} bold>{head}</Text>
+          <Text dimColor>{figures} </Text>
+          {bar}
         </Box>
       </Box>
     )
