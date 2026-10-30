@@ -1,0 +1,9 @@
+{
+  "name": "context-bar",
+  "version": "0.1.0",
+  "description": "Draws the context window as a stacked bar above the prompt, one colour per /context category. Toggled with /context-bar.",
+  "types": "./types/index.d.ts",
+  "author": {
+    "name": "Parsa Sharifi"
+  }
+}

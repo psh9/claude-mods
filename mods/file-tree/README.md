@@ -175,10 +175,34 @@ Claude's file tools (Read, Write, Edit, Grep, Glob) are tracked exactly. For a s
 
 It follows simple variables (`D=~/proj; cat $D/x`), skips heredoc bodies, and only counts paths that exist (or, for a write, whose folder exists). A command it cannot read (`$(...)`, globs, unset variables) is left out; the tree still re-lists after it runs.
 
+## Exploring and searching
+
+Focus the pane (`ctrl+x` then `tab`) and its keys show along the bottom. The first one you press takes the tree over from Claude: it stops following Claude's activity, the header says `exploring`, and a highlighted row is your cursor. Claude's badges and marks still show. `f` hands the tree back to Claude.
+
+| Key | Tree | Search results |
+| --- | --- | --- |
+| `j` / `k` | cursor down / up | next / previous matching line |
+| `l` | open the folder; on a file, open it in vim | open the line in vim |
+| `h` | close the folder (or the one holding the cursor) | back to the tree |
+| `e` | open the file in vim | open the file in vim at that line |
+| `a` | put `@path` in the prompt, for Claude | put `@path (line N)` in the prompt |
+| `n` / `p` | next / previous file Claude read or changed | first line of the next / previous file |
+| `g` | grep: type a pattern, Enter searches the folder shown (empty cancels) | |
+| `t` | switch the cursor between the tree and the results | |
+| `x` | clear the search | |
+| `f` | follow Claude again | |
+
+**Search** uses `rg` (smart case, `.gitignore` respected), else `grep -r`, and lists every matching line under its file, up to 50 per file and 500 in all. The results take the lower part of the tree's room. `/file-tree grep <pattern>` does the same from the prompt.
+
+**Claude's searches show there too.** When Claude runs Grep, or a shell command running `grep` or `rg` on files, the mod runs the same search again and lists the lines under `claude grep`. Claude's search never replaces one of yours while your cursor is in the results.
+
+**Vim** opens beside Claude Code, never inside it, since a mod has no terminal of its own. Inside tmux it opens in a new tmux window. Under WSL it opens in a new Windows Terminal tab. Elsewhere a toast gives the `vim +N path` command to run. `$VISUAL` or `$EDITOR` replaces vim (for example `EDITOR=nvim`).
+
 ## Commands and keys
 
 - `/file-tree side`: the docked side pane (the default)
 - `/file-tree band`: a horizontal band above the prompt; the choice is remembered across sessions
+- `/file-tree grep <pattern>`: search the folder shown and list the lines in the pane
 
 Keys (Control, not Cmd, on a Mac):
 

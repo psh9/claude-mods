@@ -67,6 +67,37 @@ export type Chat = {
 // The /branch tree the current conversation belongs to, root first.
 export type Chats = { current: string; nodes: Chat[] }
 
+// The person's own walk through the tree, with the pane's keys.
+export type Explore = {
+  // The folder the person is exploring; null while the tree follows Claude.
+  root: string | null
+  // Folders the person opened.
+  open: string[]
+  // The path under the cursor.
+  cursor: string
+  // Which list the cursor keys move in.
+  on: 'tree' | 'search'
+  // The grep field is showing.
+  isAsking: boolean
+}
+
+// One matching line of a search.
+export type Hit = { path: string; line: number; text: string }
+
+// The last search, the person's (the pane's grep) or Claude's (Grep, or a
+// grep or rg command), run again by the mod to list every matching line.
+export type Search = {
+  pattern: string
+  root: string
+  by: 'person' | 'claude'
+  hits: Hit[]
+  isTruncated: boolean
+  // The hit under the cursor.
+  cursor: number
+  error: string
+  at: number
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'file-tree': {
@@ -76,6 +107,8 @@ declare module 'claude-code' {
       git: Shaped<GitView | null>
       chats: Shaped<Chats>
       layout: Shaped<Layout>
+      explore: Shaped<Explore>
+      search: Shaped<Search | null>
     }
   }
 }
