@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="422" height="350" viewBox="0 0 422 350">
+<rect width="100%" height="100%" rx="10" fill="#1a1b26" stroke="#3b4261"/>
+<path d="M0 10 a10 10 0 0 1 10 -10 h402 a10 10 0 0 1 10 10 v24 h-422 z" fill="#16161e"/>
+<circle cx="18" cy="17" r="6" fill="#f7768e"/><circle cx="38" cy="17" r="6" fill="#e0af68"/><circle cx="58" cy="17" r="6" fill="#9ece6a"/>
+<text x="211" y="22" fill="#565f89" font-family="SF Mono, Menlo, Consolas, monospace" font-size="12" text-anchor="middle">file-tree: Files</text>
+<g font-family="SF Mono, Menlo, Consolas, DejaVu Sans Mono, monospace" font-size="14" xml:space="preserve">
+<text x="18.0 26.4 34.8 43.2 68.4 76.8 85.2" y="66.4" fill="#bb9af7" font-weight="bold">next4/5</text>
+<text x="18.0" y="86.4" fill="#565f89">✓</text>
+<text x="34.8 43.2 51.6 60.0 68.4 85.2 93.6 102.0 110.4 118.8 135.6 144.0 152.4 169.2 177.6 186.0 202.8 211.2 219.6 228.0 236.4" y="86.4" fill="#565f89">Writetestsforthecache</text>
+<line x1="34.8" y1="82.0" x2="244.8" y2="82.0" stroke="#565f89" stroke-width="1"/>
+<text x="18.0" y="106.4" fill="#565f89">✓</text>
+<text x="34.8 43.2 51.6 68.4 76.8 85.2 102.0 110.4 118.8 127.2 135.6" y="106.4" fill="#565f89">Runthetests</text>
+<line x1="34.8" y1="102.0" x2="144.0" y2="102.0" stroke="#565f89" stroke-width="1"/>
+<rect x="18.0" y="112.0" width="386.4" height="20" fill="#283457"/>
+<text x="18.0" y="126.4" fill="#ff9e64">▸</text>
+<text x="34.8 43.2 51.6 60.0 68.4 76.8 93.6 102.0 118.8 127.2 135.6 144.0" y="126.4" fill="#ff9e64" font-weight="bold">Committomain</text>
+<text x="18.0 26.4 34.8 43.2 51.6 60.0 68.4 76.8 85.2 93.6 102.0 110.4 118.8 127.2 135.6 144.0 152.4 160.8 169.2 177.6 186.0 194.4 202.8 211.2 219.6 228.0 236.4 244.8 253.2 261.6 270.0 278.4 286.8 295.2 303.6 312.0 320.4 328.8 337.2 345.6 354.0 362.4 370.8 379.2 387.6 396.0" y="146.4" fill="#3b4261">──────────────────────────────────────────────</text>
+<text x="18.0 26.4 34.8 43.2 51.6 60.0 68.4" y="166.4" fill="#bb9af7" font-weight="bold">~/notes</text>
+<text x="93.6 102.0 110.4 118.8 135.6 144.0 152.4 160.8 177.6 186.0 194.4 202.8 211.2 219.6 228.0 236.4 244.8 253.2 261.6 270.0 278.4 286.8 295.2 303.6 312.0 320.4 328.8 337.2 345.6" y="166.4" fill="#565f89" font-style="italic">awayfrom~/projects/weather-ap</text>
+<text x="362.4 370.8" y="166.4" fill="#ff9e64">M1</text>
+<text x="387.6 396.0" y="166.4" fill="#73daca">R1</text>
+<rect x="18.0" y="172.0" width="386.4" height="20" fill="#292e42"/>
+<text x="18.0" y="186.4" fill="#3b4261">├</text>
+<text x="34.8 43.2 51.6 60.0 68.4 76.8 85.2 93.6" y="186.4" fill="#73daca" font-weight="bold">ideas.md</text>
+<text x="396.0" y="186.4" fill="#73daca">R</text>
+<text x="18.0" y="206.4" fill="#3b4261">├</text>
+<text x="34.8 43.2 51.6 60.0 68.4 76.8 85.2 93.6 102.0 110.4 118.8 127.2 135.6 144.0 152.4" y="206.4" fill="#7dcfff">reading-list.md</text>
+<text x="18.0" y="226.4" fill="#3b4261">└</text>
+<text x="34.8 43.2 51.6 60.0 68.4 76.8 85.2 93.6 102.0 110.4 118.8 127.2 135.6 144.0" y="226.4" fill="#ff9e64" font-weight="bold">weather-app.md</text>
+<text x="396.0" y="226.4" fill="#ff9e64">M</text>
+<text x="18.0 26.4 34.8 43.2 60.0 68.4 76.8 85.2 93.6 102.0 110.4 118.8 127.2 135.6 144.0 152.4 160.8 169.2 177.6 186.0 194.4 202.8 211.2 219.6 228.0 236.4 261.6 270.0 286.8 295.2 312.0 320.4" y="246.4" fill="#565f89">also~/projects/weather-appM1A1R2</text>
+<text x="18.0 26.4 34.8 43.2 51.6 60.0 68.4 76.8 85.2 93.6 102.0 110.4 118.8 127.2 135.6 144.0 152.4 160.8 169.2 177.6 186.0 194.4 202.8 211.2 219.6 228.0 236.4 244.8 253.2 261.6 270.0 278.4 286.8 295.2 303.6 312.0 320.4 328.8 337.2 345.6 354.0 362.4 370.8 379.2 387.6 396.0" y="266.4" fill="#3b4261">──────────────────────────────────────────────</text>
+<text x="18.0 26.4 34.8" y="286.4" fill="#bb9af7" font-weight="bold">git</text>
+<text x="51.6 60.0 68.4 76.8" y="286.4" fill="#9ece6a" font-weight="bold">main</text>
+<text x="379.2 387.6" y="286.4" fill="#ff9e64">~1</text>
+<text x="18.0" y="306.4" fill="#7aa2f7" font-weight="bold">*</text>
+<text x="34.8 43.2 51.6 60.0 68.4 76.8 85.2" y="306.4" fill="#e0af68">3be91d0</text>
+<text x="102.0 110.4 118.8 127.2 135.6 152.4 160.8 177.6 186.0 194.4 202.8 211.2" y="306.4" fill="#7dcfff" font-weight="bold">(HEAD-&gt;main)</text>
+<text x="228.0 236.4 244.8 253.2 261.6 278.4 286.8 295.2 312.0 320.4 328.8 345.6 354.0 362.4 370.8" y="306.4" fill="#c0caf5">Ideasfortheweat</text>
+<text x="387.6 396.0" y="306.4" fill="#565f89">1d</text>
+<text x="18.0" y="326.4" fill="#7aa2f7" font-weight="bold">*</text>
+<text x="34.8 43.2 51.6 60.0 68.4 76.8 85.2" y="326.4" fill="#e0af68">f00a2c4</text>
+<text x="102.0 110.4 118.8 127.2 135.6 152.4 169.2 177.6 186.0 194.4 202.8 219.6 228.0 236.4 244.8" y="326.4" fill="#c0caf5">Startanotesrepo</text>
+<text x="387.6 396.0" y="326.4" fill="#565f89">1w</text>
+</g>
+</svg>

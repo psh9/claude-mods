@@ -25,12 +25,37 @@ export type Plan = { steps: Step[]; at: number }
 
 export type Layout = 'side' | 'band'
 
+// One line of `git log --graph`: the graph's own drawing, and the commit on
+// it when the line holds one.
+export type GraphLine = {
+  graph: string
+  commit?: { hash: string; refs: string; subject: string; when: string }
+}
+
+// The git state of the repository the tree shows; `isRepo` false outside one.
+export type GitView = {
+  root: string
+  isRepo: boolean
+  branch: string
+  upstream: string
+  ahead: number
+  behind: number
+  staged: number
+  changed: number
+  untracked: number
+  // Local branches, the most recently committed first.
+  branches: string[]
+  graph: GraphLine[]
+  at: number
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'file-tree': {
       files: Shaped<TouchedFile[]>
       activity: Shaped<Activity>
       plan: Shaped<Plan>
+      git: Shaped<GitView | null>
       layout: Shaped<Layout>
     }
   }

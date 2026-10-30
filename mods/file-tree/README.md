@@ -1,25 +1,33 @@
 # file-tree
 
-A pane beside the chat (or a band above the prompt) with a tree of the folder Claude is working in, styled after nvim-tree with Tokyo Night colors. It follows Claude as it works: what it reads, what it writes, where it goes, and what it plans to do next.
+A pane beside the chat (or a band above the prompt) with a tree of the folder Claude is working in, styled after nvim-tree with Tokyo Night colors. It follows Claude as it works: what it reads, what it writes, where it goes, what it plans to do next, and where the repository stands in git.
 
-```
-next  1/3
-✓ Write the README
-▸ Commit to main
-○ Push to psh9/claude-mods
-──────────────────────────────────
-~/froot_wsl/claude-mods      M2 A3 R1
-├ ▾ .claude-plugin
-│ └ marketplace.json              A
-├ ▾ mods
-│ └ ▾ file-tree
-│   ├ ▸ hooks
-│   ├ README.md                    W
-│   └ tests
-├ .gitignore                      A
-└ README.md                       M2
-also ~/.claude  R4
-```
+## Screenshots
+
+<table>
+<tr>
+<td valign="top" width="50%">
+
+**The side pane, while Claude writes a file.** The plan on top, the tree with the file being written badged ` W `, and the git graph with branch chips at the bottom.
+
+<img src="../../docs/pane.png" alt="The file-tree side pane: the plan, the tree with a file being written, and the git graph" width="420">
+
+</td>
+<td valign="top" width="50%">
+
+**Following Claude to another project.** Claude edited a file in `~/notes`, so the tree moved there; the `also` line keeps the tally of the project it left.
+
+<img src="../../docs/follow.png" alt="The file-tree pane after Claude moved to another repository" width="420">
+
+</td>
+</tr>
+</table>
+
+**The band above the prompt** (`/file-tree band`), while a shell command runs the tests:
+
+<img src="../../docs/band.png" alt="The file-tree band above the prompt, the tree laid out in columns" width="100%">
+
+The screenshots are drawn from the mod's own output: `tests/screenshots.test.tsx` plays these scenes on a sample project, and `scripts/render-screenshots.py` turns each drawing into the images in `docs/` (see [Developing](#developing)).
 
 ## Legend
 
@@ -93,6 +101,42 @@ In the band layout the plan is one line: `next ▸ Commit to main  ○ Push ...`
 
 `also ~/other-folder  M1 R4` lines list the other folders touched this session, with their totals, so nothing drops out of sight when the tree moves.
 
+### Git
+
+Under the tree, for the repository the tree shows (nothing outside one):
+
+```
+git main → origin/main ↑2                ~1 ?2
+* a41c9e2 (HEAD -> main) Retry forecast ca 12m
+*   c92e4aa (origin/main) Merge branch 'cha 3h
+|\
+| * 5b8e21f (charts) Draw the temperature c 5h
+|/
+* e10f3c7 Set up the project                2d
+● main  ○ charts  ○ fix-units
+```
+
+| Part | Means |
+| --- | --- |
+| `git main` | the branch checked out |
+| `→ origin/main` | the branch it tracks |
+| `↑2` (cyan) | 2 commits not pushed yet |
+| `↓1` (red) | 1 commit on the remote not pulled yet |
+| `+3` (green) | 3 files staged |
+| `~1` (orange) | 1 file changed, not staged |
+| `?2` (grey) | 2 untracked files |
+| `clean` (green) | nothing to commit |
+| `* a41c9e2` | a commit on the graph: its short hash (yellow), its branches and tags (cyan), its message, and how long ago (`12m`, `3h`, `2d`, `1w`) |
+| `\|\ \|/` | where branches fork and merge, colored per column as `git log --graph` draws them |
+
+The graph shows the last 6 commits. It is read again after every shell command and every write, and at most every few seconds otherwise.
+
+### Branches
+
+The last row is a chip per local branch, the most recently committed first: `●` (green) is the one checked out, `○` the others. Click a chip (or focus the pane with `ctrl+x` then `tab`, move to it with Tab and press Enter) to run `git switch <branch>` in that repository; a toast says whether it worked, and why not when it did not (uncommitted changes in the way, for one). Claude is not told of the switch, so mention it if Claude is in the middle of something.
+
+In the band layout, git is one line: the branch and its counts, the latest commit, and the chips.
+
 ## Following Claude
 
 The tree shows the folder of Claude's latest activity. Inside the session's folder that is the session's folder. When Claude touches a path outside it, the tree moves to that path's project: the nearest folder above it holding `.git`, `.claude`, `package.json`, `pyproject.toml`, `Cargo.toml` or `go.mod`, stopping short of the home folder, or else the file's own folder. It moves back as soon as Claude works in the session's folder again.
@@ -126,4 +170,17 @@ The side pane docks beside the chat in fullscreen mode (`"tui": "fullscreen"` in
 
 ## Requirements
 
-Claude Code with plugin hook modules (2.1.314 or later). macOS or Linux: paths are handled with `/`.
+Claude Code with plugin hook modules (2.1.314 or later). macOS or Linux: paths are handled with `/`. `git` on the PATH for the git section.
+
+## Developing
+
+From the repository root:
+
+```
+claude --plugin-dir mods/file-tree          # a session with this copy loaded
+claude plugin validate mods/file-tree       # check the manifest and module
+claude plugin test mods/file-tree           # run the tests
+claude plugin test mods/file-tree | python3 scripts/render-screenshots.py   # redraw docs/
+```
+
+The last line plays the scenes in `tests/screenshots.test.tsx` and writes `docs/<scene>.svg`, plus a `docs/<scene>.png` where Google Chrome or Chromium is installed (set `CHROME` to its path elsewhere).

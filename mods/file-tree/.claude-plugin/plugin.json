@@ -1,6 +1,6 @@
 {
   "name": "file-tree",
-  "version": "0.2.0",
-  "description": "A side pane or band with a live tree of the working folder: what Claude reads, writes and plans next",
+  "version": "0.3.0",
+  "description": "A side pane or band with a live tree of the working folder: what Claude reads, writes and plans next, with the git graph and a branch switcher",
   "types": "./types/index.d.ts"
 }

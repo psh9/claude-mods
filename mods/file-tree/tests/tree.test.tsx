@@ -154,6 +154,75 @@ test('the plan tool shows the steps above the tree', async ($, on) => {
   await ui.unmount()
 })
 
+const GIT: Record<string, string> = {
+  status: [
+    '# branch.oid 0000000',
+    '# branch.head main',
+    '# branch.upstream origin/main',
+    '# branch.ab +2 -0',
+    '1 M. N... 100644 100644 100644 aaa bbb src/main.py',
+    '1 .M N... 100644 100644 100644 aaa bbb README.md',
+    '? notes.txt',
+  ].join('\n'),
+  log: [
+    '* \u0001a41c9e2\u0002HEAD -> main\u0002Add the cache\u00022 minutes ago',
+    '*   \u0001c92e4aa\u0002\u0002Merge branch \'charts\'\u00023 hours ago',
+    '|\\',
+    '| * \u00015b8e21f\u0002charts\u0002Draw the chart\u00025 hours ago',
+    '|/',
+    '* \u0001e10f3c7\u0002origin/main\u0002Set up the project\u00022 days ago',
+  ].join('\n'),
+  'for-each-ref': 'main\ncharts',
+}
+
+const withGit = (on: Parameters<Parameters<typeof test>[1]>[1], runs: string[][]) => {
+  on('process.run', (_, e) => {
+    runs.push([...e.argv])
+    const verb = e.argv[3] ?? ''
+
+    return { value: { exitCode: e.argv[1] === '-C' && e.argv[2] === '/Users/me/proj' ? 0 : 128, stdout: GIT[verb] ?? '', stderr: '' } }
+  })
+}
+
+test('the git section shows the branch, its counts and the graph', async ($, on) => {
+  engine(on)
+  withGit(on, [])
+  on('tool.call', () => ({ result: {} }))
+  await start($)
+  await $.tool.call({ tool: 'Read', file_path: '/Users/me/proj/src/main.py' })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect((await ui.find({ type: 'Text', text: /^git main/ }))?.text).toBe('git main → origin/main ↑2')
+  expect((await ui.find({ type: 'Text', text: /^\+1/ }))?.text).toBe('+1 ~1 ?1')
+  expect((await ui.find({ type: 'Text', text: /a41c9e2/ }))?.text).toBe('* a41c9e2 (HEAD -> main) Add the cache')
+  expect((await ui.find({ type: 'Text', text: /5b8e21f/ }))?.text).toBe('| * 5b8e21f (charts) Draw the chart')
+  expect((await ui.find({ type: 'Text', text: /^2m$/ }))?.text).toBe('2m')
+  expect((await ui.find({ type: 'Text', text: /charts$/ }))?.text).toBe('○ charts')
+  await ui.unmount()
+})
+
+test('pressing a branch chip switches to it', async ($, on) => {
+  engine(on)
+  const runs: string[][] = []
+  withGit(on, runs)
+  const toasts: string[] = []
+  on('ui.toast', (_, e) => {
+    toasts.push(e.text)
+
+    return { value: undefined }
+  })
+  on('tool.call', () => ({ result: {} }))
+  await start($)
+  await $.tool.call({ tool: 'Read', file_path: '/Users/me/proj/src/main.py' })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'branch:charts' })
+  await ui.unmount()
+
+  expect(runs.some(argv => argv.join(' ') === 'git -C /Users/me/proj switch charts')).toBe(true)
+  expect(toasts).toEqual(['Switched to charts'])
+})
+
 test('the band lays the tree out across the prompt', async ($, on) => {
   engine(on)
   on('command.run', () => ({ text: '' }))

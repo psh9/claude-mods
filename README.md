@@ -4,7 +4,15 @@ Mods for Claude Code: small plugins that change its interface while you work.
 
 | Mod | What it does |
 | --- | --- |
-| [file-tree](mods/file-tree/README.md) | A side pane or band with a tree of the working folder that shows what Claude reads, writes and plans next, live. The legend for its marks (`M2 A3 R1`, the ` R ` ` W ` ` S ` ` $ ` badges, the plan glyphs) is in its README. |
+| [file-tree](mods/file-tree/README.md) | A side pane or band with a tree of the working folder that shows, live, what Claude reads, writes and plans next, plus the repository's git graph and a branch switcher. The legend for its marks (`M2 A3 R1`, the ` R ` ` W ` ` S ` ` $ ` badges, the plan and git glyphs) is in its README. |
+
+<p align="center">
+  <img src="docs/pane.png" alt="The file-tree pane: Claude's plan, the tree with the file being written, and the git graph" width="380">
+</p>
+
+<p align="center">
+  <img src="docs/band.png" alt="The file-tree band above the prompt" width="100%">
+</p>
 
 ## Install
 

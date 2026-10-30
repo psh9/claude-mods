@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Activity, Layout, Op, Plan, Step, TouchedFile } from '../types'
+import type { Activity, GitView, GraphLine, Layout, Op, Plan, Step, TouchedFile } from '../types'
 
 const PANE = 'file-tree'
 const PLAN_TOOL = 'mcp__file-tree__plan'
@@ -20,6 +20,9 @@ const plan = atom({ plugin: 'file-tree', key: 'plan' } as const, { steps: [], at
 })
 const layout = atom({ plugin: 'file-tree', key: 'layout' } as const, 'side', {
   shape: 'layout-1',
+})
+const git = atom({ plugin: 'file-tree', key: 'git' } as const, null, {
+  shape: 'git-1',
 })
 
 const TOOL_OPS: Record<string, Op> = {
@@ -59,6 +62,12 @@ const MAX_PER_DIR = 30
 const FLASH_MS = 8000
 const BAND_COLUMN = 30
 const MAX_STEPS = 12
+// Commits the git graph shows, and how long a reading of the repository
+// stands before a file tool's call reads it again.
+const GIT_COMMITS = 6
+const GIT_FRESH_MS = 3000
+// Graph columns cycle through these.
+const GRAPH_COLORS = ['#7aa2f7', '#bb9af7', '#9ece6a', '#7dcfff', '#e0af68']
 
 // Tokyo Night (night).
 const C = {
@@ -449,6 +458,83 @@ const stepsOf = (input: unknown): Step[] => {
   }).slice(0, MAX_STEPS)
 }
 
+const gitRun = ($: EngineInterface, root: string, args: string[]) =>
+  $.process.run(['git', '-C', root, ...args], { timeoutMs: 4000 })
+    .catch(() => ({ exitCode: 1, stdout: '', stderr: 'git did not run' }))
+
+const UNITS: Record<string, string> = {
+  second: 's', minute: 'm', hour: 'h', day: 'd', week: 'w', month: 'mo', year: 'y',
+}
+// "3 minutes ago" as "3m".
+const shortWhen = (text: string) => {
+  const parts = /^(\d+) (second|minute|hour|day|week|month|year)s? ago$/.exec(text.trim())
+
+  return parts === null ? text.trim() : `${parts[1]}${UNITS[parts[2] ?? ''] ?? ''}`
+}
+
+const readGit = async ($: EngineInterface, root: string): Promise<GitView> => {
+  const at = await $.clock.now()
+  const view: GitView = {
+    root, isRepo: false, branch: '', upstream: '', ahead: 0, behind: 0,
+    staged: 0, changed: 0, untracked: 0, branches: [], graph: [], at,
+  }
+  const status = await gitRun($, root, ['status', '--porcelain=v2', '--branch'])
+  if (status.exitCode !== 0) return view
+  view.isRepo = true
+  for (const line of status.stdout.split('\n')) {
+    if (line.startsWith('# branch.head ')) view.branch = line.slice(14)
+    else if (line.startsWith('# branch.upstream ')) view.upstream = line.slice(18)
+    else if (line.startsWith('# branch.ab ')) {
+      const counts = /\+(\d+) -(\d+)/.exec(line)
+      view.ahead = Number(counts?.[1] ?? 0)
+      view.behind = Number(counts?.[2] ?? 0)
+    } else if (line.startsWith('1 ') || line.startsWith('2 ')) {
+      if (line[2] !== '.') view.staged++
+      if (line[3] !== '.') view.changed++
+    } else if (line.startsWith('u ')) view.changed++
+    else if (line.startsWith('? ')) view.untracked++
+  }
+
+  const log = await gitRun($, root, [
+    'log', '--graph', '--color=never', `-n${GIT_COMMITS}`,
+    '--format=%x01%h%x02%D%x02%s%x02%cr',
+  ])
+  view.graph = log.exitCode !== 0 ? [] : log.stdout.split('\n').filter(line => line.trim() !== '')
+    .map((line): GraphLine => {
+      const [graph = '', rest] = line.split('\u0001')
+      if (rest === undefined) return { graph: line.trimEnd() }
+      const [hash = '', refs = '', subject = '', when = ''] = rest.split('\u0002')
+
+      return { graph, commit: { hash, refs, subject, when: shortWhen(when) } }
+    })
+
+  const heads = await gitRun($, root, [
+    'for-each-ref', '--sort=-committerdate', '--count=8', '--format=%(refname:short)', 'refs/heads',
+  ])
+  view.branches = heads.exitCode !== 0 ? [] : heads.stdout.split('\n').filter(name => name !== '')
+
+  return view
+}
+
+// Reads the repository again unless the last reading of the same root is
+// fresh; `isForced` after anything that may have changed it.
+const refreshGit = async ($: EngineInterface, root: string, isForced: boolean) => {
+  const current = await read($, git)
+  const now = await $.clock.now()
+  if (!isForced && current !== null && current.root === root && now - current.at < GIT_FRESH_MS) return
+  const view = await readGit($, root)
+  await update($, git, () => view)
+}
+
+// A branch chip's press: switch, say how it went, read the repository again.
+const switchBranch = async ($: EngineInterface, root: string, name: string) => {
+  const ran = await gitRun($, root, ['switch', name])
+  const reason = ran.stderr.split('\n').find(line => line.trim() !== '') ?? 'it failed'
+  $.ui.toast(ran.exitCode === 0 ? `Switched to ${name}` : `git switch ${name}: ${reason}`)
+  await refreshGit($, root, true)
+  $.ui.invalidate('ui.render')
+}
+
 const walk = async (
   $: EngineInterface,
   dir: string,
@@ -573,6 +659,110 @@ const drawPlan = async ($: EngineInterface, e: RenderEvent, width: number, isCom
   ]
 }
 
+// The git section: a rule, the branch and its counts, the graph of recent
+// commits, and a chip per local branch that switches to it; one line and the
+// chips when `isCompact`. Nothing outside a repository.
+const drawGit = async ($: EngineInterface, e: RenderEvent, width: number, root: string, isCompact: boolean) => {
+  const { Box, Button, Text } = $.ui.resolve(e)
+  const view = await read($, git)
+  if (view === null || !view.isRepo || view.root !== root) return []
+
+  const sync = [
+    view.ahead > 0 ? <Text color={C.cyan}>{` ↑${view.ahead}`}</Text> : null,
+    view.behind > 0 ? <Text color={C.red}>{` ↓${view.behind}`}</Text> : null,
+  ]
+  const isClean = view.staged + view.changed + view.untracked === 0
+  const counts = isClean
+    ? [<Text color={C.green}>clean</Text>]
+    : [
+        view.staged > 0 ? <Text color={C.green}>{`+${view.staged} `}</Text> : null,
+        view.changed > 0 ? <Text color={C.orange}>{`~${view.changed} `}</Text> : null,
+        view.untracked > 0 ? <Text color={C.comment}>{`?${view.untracked}`}</Text> : null,
+      ]
+  const branchLine = (
+    <Box flexDirection="row" justifyContent="space-between" width={width}>
+      <Box flexShrink={1}>
+        <Text wrap="truncate-end">
+          <Text color={C.purple} bold>git </Text>
+          <Text color={C.green} bold>{view.branch}</Text>
+          {view.upstream !== '' && <Text color={C.comment}>{` → ${view.upstream}`}</Text>}
+          {sync}
+        </Text>
+      </Box>
+      <Box flexShrink={0} paddingLeft={1}>
+        <Text>{counts}</Text>
+      </Box>
+    </Box>
+  )
+  const chips = view.branches.length < 2 ? [] : [
+    <Box flexDirection="row" flexWrap="wrap" columnGap={2} width={width}>
+      {view.branches.map(name => {
+        const isCurrent = name === view.branch
+
+        return (
+          <Button key={`branch:${name}`} label={name} plain onPress={() => switchBranch($, view.root, name)}>
+            <Text color={isCurrent ? C.green : C.comment} bold={isCurrent}>{`${isCurrent ? '●' : '○'} ${name}`}</Text>
+          </Button>
+        )
+      })}
+    </Box>,
+  ]
+
+  if (isCompact) {
+    const head = view.graph.find(line => line.commit !== undefined)?.commit
+
+    return [
+      <Box flexDirection="row" columnGap={3} width={width}>
+        <Box flexShrink={1}>
+          <Text wrap="truncate-end">
+            <Text color={C.purple} bold>git </Text>
+            <Text color={C.green} bold>{view.branch}</Text>
+            {sync}
+            <Text>{'  '}</Text>
+            {counts}
+            {head !== undefined && <Text color={C.yellow}>{`  ${head.hash} `}</Text>}
+            {head !== undefined && <Text color={C.fg}>{head.subject}</Text>}
+          </Text>
+        </Box>
+        <Box flexShrink={0}>{chips}</Box>
+      </Box>,
+    ]
+  }
+
+  const graph = view.graph.map(line => {
+    const drawing = [...line.graph].map((ch, index) => (
+      <Text color={ch === ' ' ? undefined : GRAPH_COLORS[Math.floor(index / 2) % GRAPH_COLORS.length]} bold={ch === '*'}>
+        {ch}
+      </Text>
+    ))
+    const commit = line.commit
+    if (commit === undefined) return <Text wrap="truncate-end">{drawing}</Text>
+
+    return (
+      <Box flexDirection="row" justifyContent="space-between" width={width}>
+        <Box flexShrink={1}>
+          <Text wrap="truncate-end">
+            {drawing}
+            <Text color={C.yellow}>{commit.hash}</Text>
+            {commit.refs !== '' && <Text color={C.cyan} bold>{` (${commit.refs})`}</Text>}
+            <Text color={C.fg}>{` ${commit.subject}`}</Text>
+          </Text>
+        </Box>
+        <Box flexShrink={0} paddingLeft={1}>
+          <Text color={C.comment}>{commit.when}</Text>
+        </Box>
+      </Box>
+    )
+  })
+
+  return [
+    <Text color={C.line}>{'─'.repeat(Math.max(1, width))}</Text>,
+    branchLine,
+    ...graph,
+    ...chips,
+  ]
+}
+
 // The tree of the folder the latest activity is in, its rows windowed to
 // the room, with the header and footer around it.
 const drawTree = async ($: EngineInterface, e: RenderEvent, width: number, room: number) => {
@@ -662,11 +852,13 @@ const drawTree = async ($: EngineInterface, e: RenderEvent, width: number, room:
   )
   const header = (
     <Box flexDirection="row" justifyContent="space-between" width={width}>
-      <Text wrap="truncate-end">
-        <Text color={C.purple} bold>{tildify(root)}</Text>
-        {root !== cwd && <Text color={C.comment} italic>{`  away from ${tildify(cwd)}`}</Text>}
-      </Text>
-      {totals}
+      <Box flexShrink={1}>
+        <Text wrap="truncate-end">
+          <Text color={C.purple} bold>{tildify(root)}</Text>
+          {root !== cwd && <Text color={C.comment} italic>{`  away from ${tildify(cwd)}`}</Text>}
+        </Text>
+      </Box>
+      <Box flexShrink={0} paddingLeft={1}>{totals}</Box>
     </Box>
   )
   const lines = footer.map(([other, list]) => {
@@ -719,6 +911,7 @@ export const register: Register = on => {
     const start: Layout = saved === 'band' ? 'band' : 'side'
     await update($, layout, () => start)
     if (start === 'side') void $.ui.open({ id: PANE, title: 'Files' })
+    await refreshGit($, cwd, true)
 
     return next(e)
   })
@@ -745,13 +938,11 @@ export const register: Register = on => {
     const steps = stepsOf(e)
     const at = await $.clock.now()
     await update($, plan, () => ({ steps, at }))
+    const text = steps.length === 0
+      ? 'Plan cleared from the file-tree pane.'
+      : `Plan shown in the file-tree pane: ${steps.length} steps.`
 
-    return {
-      result: {},
-      text: steps.length === 0
-        ? 'Plan cleared from the file-tree pane.'
-        : `Plan shown in the file-tree pane: ${steps.length} steps.`,
-    }
+    return { result: text, text }
   })
 
   on('tool.call', async ($, e, next) => {
@@ -774,8 +965,12 @@ export const register: Register = on => {
     }
     if (tracked.length === 0) {
       const ran = await next(e)
-      // A shell command may add or remove files the tree shows.
-      if (e.tool === 'Bash') $.ui.invalidate('ui.render')
+      if (e.tool === 'Bash') {
+        // A shell command may add or remove files, or commit and switch.
+        const { last } = await read($, activity)
+        await refreshGit($, last?.root ?? cwd, true)
+        $.ui.invalidate('ui.render')
+      }
 
       return ran
     }
@@ -785,6 +980,8 @@ export const register: Register = on => {
     // A shell command that exits non-zero may still have written its files.
     const isDone = ran.deny === undefined && (e.tool === 'Bash' || ran.isError !== true)
     await finish($, e.tool_use_id, tracked, isDone)
+    const isChange = e.tool === 'Bash' || tracked.some(one => one.op === 'write')
+    await refreshGit($, focusOf(tracked).root, isChange)
 
     return ran
     // The tree is bookkeeping: a failure here never stops the tool.
@@ -795,8 +992,10 @@ export const register: Register = on => {
     if (cwd === '') return <Text color={C.comment}>Waiting for the session to start.</Text>
 
     const width = e.props.bodyColumns
+    const { last } = await read($, activity)
     const planRows = await drawPlan($, e, width, false)
-    const room = e.props.scroll.bodyRows - planRows.length
+    const gitRows = await drawGit($, e, width, last?.root ?? cwd, false)
+    const room = e.props.scroll.bodyRows - planRows.length - gitRows.length
     const { header, view, lines } = await drawTree($, e, width, room)
 
     return (
@@ -805,6 +1004,7 @@ export const register: Register = on => {
         {header}
         {view}
         {lines}
+        {gitRows}
       </Box>
     )
   })
@@ -816,8 +1016,10 @@ export const register: Register = on => {
     const width = e.props.bodyColumns
     const columns = Math.max(1, Math.floor(width / BAND_COLUMN))
     const columnWidth = Math.floor(width / columns) - 1
+    const { last } = await read($, activity)
     const planRows = await drawPlan($, e, width, true)
-    const perColumn = Math.max(3, e.props.scroll.bodyRows - 2 - planRows.length)
+    const gitRows = await drawGit($, e, width, last?.root ?? cwd, true)
+    const perColumn = Math.max(3, e.props.scroll.bodyRows - 2 - planRows.length - gitRows.length)
     const { header, view, lines } = await drawTree($, e, columnWidth, perColumn * columns + 1)
     const height = Math.max(1, Math.ceil(view.length / columns))
     const stacks = Array.from({ length: columns }, (_, index) =>
@@ -834,6 +1036,7 @@ export const register: Register = on => {
           ))}
         </Box>
         {lines}
+        {gitRows}
       </Box>
     )
   })
