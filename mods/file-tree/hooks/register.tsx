@@ -1209,6 +1209,23 @@ export const register: Register = on => {
     return ran
   }).catch(($, e, next) => next(e))
 
+  // /cd moves the session folder: the tree and git follow it, as on session start.
+  on('command.run', { command: 'cd' }, async ($, e, next) => {
+    if (cwd === '') return next(e)
+    const ran = await next(e)
+    const word = e.args.trim().replace(/^(['"])(.*)\1$/, '$2')
+    const target = word === '' ? homeOf(cwd) || '/' : word.replace(/^~(?=\/|$)/, homeOf(cwd))
+    const dir = normalize(target, cwd)
+    if (await $.fs.exists(dir).catch(() => false)) {
+      cwd = dir
+      roots.clear()
+      await refreshGit($, cwd, true)
+      $.ui.invalidate('ui.render')
+    }
+
+    return ran
+  }).catch(($, e, next) => next(e))
+
   // Counts the prompt just answered; and a /clear starts another conversation.
   on('turn.complete', async ($, e, next) => {
     const done = await next(e)
