@@ -121,6 +121,27 @@ chats  2 branches
 
 A branch is named by what follows `/branch` (`/branch try-a`), else `branch 1`, `branch 2`, ... The tree is kept across sessions, so resuming any conversation of it (`claude --resume`) shows the whole tree again. In the band layout it is one line: `chat Root › try-b  shares 5 of 6 prompts  2 branches`.
 
+### History
+
+Under the chats, the prompts of the conversation this session is in, numbered, the latest six in view:
+
+```
+history  12 prompts                        ↑6
+ 7 create a new branch and build the feature
+   ⑂ branched here
+ 8 now the README
+ 9 commit it
+```
+
+| Part | Means |
+| --- | --- |
+| `7 ...` | the 7th prompt, its first line |
+| dim prompt | shared with the conversation this one branched from |
+| `⑂ branched here` | where `/branch` made this conversation |
+| `↑6 ↓2` | prompts above and below the ones in view |
+
+Click a prompt to open it: its whole text shows, then the start of Claude's answer after `⏺`. Click it again to close it. With the pane focused, `c` puts the cursor in the history: `j` / `k` (or `n` / `p`) step to the next or earlier prompt, `l` opens it, `h` closes it (and again goes back to the tree), `a` puts the prompt back in the prompt box to edit or ask again, `y` copies it, `x` or `f` returns to the latest. The transcript itself does not scroll: a mod cannot move it.
+
 ### Footer
 
 `also ~/other-folder  M1 R4` lines list the other folders touched this session, with their totals, so nothing drops out of sight when the tree moves.
@@ -189,6 +210,7 @@ Focus the pane (`ctrl+x` then `tab`) and its keys show along the bottom. The fir
 | `n` / `p` | next / previous file Claude read or changed | first line of the next / previous file |
 | `g` | grep: type a pattern, Enter searches the folder shown (empty cancels) | |
 | `t` | switch the cursor between the tree and the results | |
+| `c` | switch the cursor between the tree and the prompt history (see [History](#history)) | |
 | `x` | clear the search | |
 | `f` | follow Claude again | |
 

@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, SessionMessage } from 'claude-code'
 
-import type { Activity, Chat, Explore, GitView, GraphLine, Hit, Layout, Op, Plan, Search, Step, TouchedFile } from '../types'
+import type { Activity, Chat, Explore, GitView, GraphLine, History, Hit, Layout, Op, Plan, Search, Step, TouchedFile, Turn } from '../types'
 
 const PANE = 'file-tree'
 const PLAN_TOOL = 'mcp__file-tree__plan'
@@ -33,6 +33,10 @@ const explore = atom({ plugin: 'file-tree', key: 'explore' } as const, FOLLOWING
 })
 const search = atom({ plugin: 'file-tree', key: 'search' } as const, null, {
   shape: 'search-1',
+})
+const LATEST: History = { turns: [], cursor: -1, isOpen: false }
+const history = atom({ plugin: 'file-tree', key: 'history' } as const, LATEST, {
+  shape: 'history-1',
 })
 
 const TOOL_OPS: Record<string, Op> = {
@@ -87,6 +91,13 @@ const MAX_CHATS = 200
 const PLANS_KEY = 'plans'
 const MAX_PLANS = 100
 const MAX_CHAT_ROWS = 8
+// The prompt history: prompts listed at once, and the lines an opened one
+// shows of itself and of Claude's answer.
+const MAX_TURN_ROWS = 6
+const MAX_PROMPT_LINES = 8
+const MAX_REPLY_LINES = 4
+const MAX_PROMPT_CHARS = 2000
+const MAX_REPLY_CHARS = 800
 const BRANCH_COMMANDS = new Set(['branch', 'fork'])
 // Search: hits kept, matches per file, and the share of the pane's room the
 // results take beside the tree (more while the cursor is in them).
@@ -656,6 +667,38 @@ const isPrompt = (message: SessionMessage) =>
   message.role === 'user' && (message.toolResults?.length ?? 0) === 0
   && message.text.split('\n').some(line => line.trim() !== '' && !line.trim().startsWith('<'))
 
+// A prompt's own words: the lines the person typed, not the tags the engine
+// wraps around a command or a reminder.
+const promptText = (text: string) =>
+  text.split('\n').filter(line => !line.trim().startsWith('<')).join('\n').trim()
+
+// The conversation's prompts in order, each with the last text Claude
+// answered it with.
+const turnsOf = (messages: readonly SessionMessage[]): Turn[] => {
+  const out: Turn[] = []
+  for (const message of messages) {
+    if (isPrompt(message)) {
+      out.push({ text: promptText(message.text).slice(0, MAX_PROMPT_CHARS), reply: '' })
+      continue
+    }
+    const turn = out.at(-1)
+    if (message.role === 'assistant' && turn !== undefined && message.text.trim() !== '') {
+      turn.reply = message.text.trim().slice(0, MAX_REPLY_CHARS)
+    }
+  }
+
+  return out
+}
+
+// Reads the conversation's prompts again; a cursor past the end (a /clear)
+// goes back to the latest.
+const seeHistory = async ($: EngineInterface) => {
+  const messages = await $.session.messages()
+  if (!Array.isArray(messages)) return
+  const turns = turnsOf(messages)
+  await update($, history, now => (now.cursor < turns.length ? { ...now, turns } : { ...LATEST, turns }))
+}
+
 // What /branch prints into the conversation it makes.
 const BRANCH_NOTICE = /Branched conversation(?: "([^"]*)")?\. You are now in the new branch \(session ([0-9a-f-]+)\)\. Use \/resume ([0-9a-f-]+)/
 
@@ -970,6 +1013,109 @@ const drawChats = async ($: EngineInterface, e: RenderEvent, width: number, isCo
     </Text>,
     ...rows,
     ...(left > 0 ? [<Text color={C.comment}>{`${left} more`}</Text>] : []),
+    <Text color={C.line}>{'─'.repeat(Math.max(1, width))}</Text>,
+  ]
+}
+
+// Words laid into lines of `width`, a word longer than that cut; at most `max`
+// lines, the last ending in an ellipsis when there was more.
+const wrapLines = (text: string, width: number, max: number) => {
+  const room = Math.max(8, width)
+  const lines: string[] = []
+  for (const para of text.split('\n')) {
+    let line = ''
+    for (const word of para.split(/\s+/).filter(one => one !== '')) {
+      for (let piece = word; piece !== ''; piece = piece.slice(room)) {
+        const part = piece.slice(0, room)
+        if (line === '') line = part
+        else if (line.length + 1 + part.length <= room) line += ` ${part}`
+        else {
+          lines.push(line)
+          line = part
+        }
+      }
+    }
+    lines.push(line)
+  }
+  while (lines.length > 0 && lines.at(-1) === '') lines.pop()
+  if (lines.length <= max) return lines
+  const kept = lines.slice(0, max)
+  kept[max - 1] = `${(kept[max - 1] ?? '').slice(0, room - 1)}…`
+
+  return kept
+}
+
+// Opens the prompt `index`, or closes it when it is the one open; the cursor
+// keys then walk the history.
+const pressTurn = async ($: EngineInterface, index: number) => {
+  await update($, history, now => ({
+    ...now,
+    cursor: index,
+    isOpen: !(now.isOpen && now.cursor === index),
+  }))
+  await update($, explore, (now): Explore => ({ ...now, on: 'chat' }))
+}
+
+// This conversation's prompts under the /branch tree: a row per prompt,
+// numbered, that a click opens to show it whole and the start of Claude's
+// answer. The window holds the latest, or the ones around the cursor.
+const drawHistory = async ($: EngineInterface, e: RenderEvent, width: number) => {
+  const { Box, Button, Text } = $.ui.resolve(e)
+  const { turns, cursor, isOpen } = await read($, history)
+  if (turns.length === 0) return []
+  const walking = await read($, explore)
+  const isOn = walking.on === 'chat'
+  const { current, nodes } = await read($, chats)
+  const forkAt = nodes.find(chat => chat.id === current && chat.parent !== null)?.forkAt ?? 0
+  const at = cursor < 0 ? turns.length - 1 : cursor
+  const start = Math.min(Math.max(0, at - Math.floor(MAX_TURN_ROWS / 2)), Math.max(0, turns.length - MAX_TURN_ROWS))
+  const numberWidth = String(turns.length).length
+  const indent = ' '.repeat(numberWidth + 1)
+
+  const rows = turns.slice(start, start + MAX_TURN_ROWS).flatMap((turn, offset) => {
+    const index = start + offset
+    const isCursor = index === at && (isOn || cursor >= 0)
+    const first = turn.text.split('\n').find(line => line.trim() !== '') ?? ''
+    const row = (
+      <Box key={`turn:${index}`} width={width} backgroundColor={isCursor ? (isOn ? C.selection : C.cursorLine) : undefined}>
+        <Button key={`turn:${index}`} label={`prompt ${index + 1}`} plain onPress={() => pressTurn($, index)}>
+          <Text wrap="truncate-end">
+            <Text color={isCursor ? C.orange : C.comment}>{`${String(index + 1).padStart(numberWidth)} `}</Text>
+            <Text color={index < forkAt ? C.comment : C.fg} bold={isCursor}>{first}</Text>
+          </Text>
+        </Button>
+      </Box>
+    )
+    const fork = forkAt > 0 && index === forkAt - 1 && index < turns.length - 1
+      ? [<Text color={C.comment} italic wrap="truncate-end">{`${indent}⑂ branched here`}</Text>]
+      : []
+    if (!(isOpen && index === at)) return [row, ...fork]
+    const body = wrapLines(turn.text, width - indent.length, MAX_PROMPT_LINES).slice(1)
+    const reply = turn.reply === '' ? [] : wrapLines(turn.reply, width - indent.length - 2, MAX_REPLY_LINES)
+
+    return [
+      row,
+      ...body.map(line => <Text color={C.fg} wrap="truncate-end">{`${indent}${line}`}</Text>),
+      ...reply.map((line, n) => (
+        <Text wrap="truncate-end">
+          <Text color={C.purple}>{n === 0 ? `${indent}⏺ ` : `${indent}  `}</Text>
+          <Text color={C.comment}>{line}</Text>
+        </Text>
+      )),
+      ...fork,
+    ]
+  })
+  const above = start
+  const below = Math.max(0, turns.length - start - MAX_TURN_ROWS)
+
+  return [
+    <Box flexDirection="row" justifyContent="space-between" width={width}>
+      <Text color={C.purple} bold>{`history  ${turns.length} prompt${turns.length === 1 ? '' : 's'}`}</Text>
+      <Text color={C.comment}>
+        {above > 0 || below > 0 ? `${above > 0 ? `↑${above}` : ''}${above > 0 && below > 0 ? ' ' : ''}${below > 0 ? `↓${below}` : ''}` : ''}
+      </Text>
+    </Box>,
+    ...rows,
     <Text color={C.line}>{'─'.repeat(Math.max(1, width))}</Text>,
   ]
 }
@@ -1354,8 +1500,27 @@ const hitAtCursor = async ($: EngineInterface) => {
 const inSearch = async ($: EngineInterface) =>
   (await read($, explore)).on === 'search' && ((await read($, search))?.hits.length ?? 0) > 0
 
+const inChat = async ($: EngineInterface) =>
+  (await read($, explore)).on === 'chat' && (await read($, history)).turns.length > 0
+
+// The prompt under the history's cursor.
+const turnAtCursor = async ($: EngineInterface) => {
+  const { turns, cursor } = await read($, history)
+
+  return turns[cursor < 0 ? turns.length - 1 : cursor]
+}
+
 // j and k: a row down or up, in the list the cursor is in.
 const move = async ($: EngineInterface, by: number) => {
+  if (await inChat($)) {
+    await update($, history, now => {
+      const at = now.cursor < 0 ? now.turns.length - 1 : now.cursor
+
+      return { ...now, cursor: Math.min(now.turns.length - 1, Math.max(0, at + by)) }
+    })
+
+    return
+  }
   if (await inSearch($)) {
     await update($, search, now => (now === null ? now : {
       ...now, cursor: Math.min(now.hits.length - 1, Math.max(0, now.cursor + by)),
@@ -1372,6 +1537,11 @@ const move = async ($: EngineInterface, by: number) => {
 
 // l: opens the folder under the cursor, or the file in vim.
 const openRow = async ($: EngineInterface) => {
+  if (await inChat($)) {
+    await update($, history, now => ({ ...now, cursor: now.cursor < 0 ? now.turns.length - 1 : now.cursor, isOpen: true }))
+
+    return
+  }
   if (await inSearch($)) return editHere($)
   const { row } = await rowAtCursor($)
   if (row === undefined) return
@@ -1381,6 +1551,13 @@ const openRow = async ($: EngineInterface) => {
 
 // h: closes the folder under the cursor, else the one holding it.
 const closeRow = async ($: EngineInterface) => {
+  if (await inChat($)) {
+    const { isOpen } = await read($, history)
+    if (isOpen) await update($, history, now => ({ ...now, isOpen: false }))
+    else await update($, explore, (now): Explore => ({ ...now, on: 'tree' }))
+
+    return
+  }
   if (await inSearch($)) {
     await update($, explore, (now): Explore => ({ ...now, on: 'tree' }))
 
@@ -1399,6 +1576,7 @@ const closeRow = async ($: EngineInterface) => {
 
 // e: the file under the cursor in vim, at the line of a search hit.
 const editHere = async ($: EngineInterface) => {
+  if (await inChat($)) return $.ui.toast('A prompt, not a file: a puts it back in the prompt box')
   if (await inSearch($)) {
     const hit = await hitAtCursor($)
     if (hit !== undefined) await openInEditor($, hit.path, hit.line)
@@ -1412,6 +1590,14 @@ const editHere = async ($: EngineInterface) => {
 
 // a: an @-mention of the file under the cursor in the prompt, for Claude.
 const mentionHere = async ($: EngineInterface) => {
+  if (await inChat($)) {
+    const turn = await turnAtCursor($)
+    if (turn === undefined) return
+    const filled = await $.prompt.fill({ text: turn.text, mode: 'replace' }).catch(() => ({ isFilled: false }))
+    $.ui.toast(filled.isFilled ? 'Prompt put back in the prompt box: edit it, or Enter to ask again' : 'Could not reach the prompt box')
+
+    return
+  }
   const hit = (await inSearch($)) ? await hitAtCursor($) : undefined
   const path = hit?.path ?? (await rowAtCursor($)).row?.path
   if (path === undefined) return
@@ -1423,6 +1609,7 @@ const mentionHere = async ($: EngineInterface) => {
 // n and p: the next or previous file, in the search's hits or among the
 // files Claude touched.
 const jumpFile = async ($: EngineInterface, by: 1 | -1) => {
+  if (await inChat($)) return move($, by)
   if (await inSearch($)) {
     await update($, search, now => {
       if (now === null) return now
@@ -1469,6 +1656,21 @@ const submitGrep = async ($: EngineInterface, pattern: string) => {
   await update($, explore, (now): Explore => ({ ...now, on: 'search' }))
 }
 
+// c: the cursor onto the prompt history, or back to the tree.
+const toggleChat = async ($: EngineInterface) => {
+  const { turns } = await read($, history)
+  if (turns.length === 0) return $.ui.toast('No prompts in this conversation yet')
+  await update($, explore, (now): Explore => ({ ...now, on: now.on === 'chat' ? 'tree' : 'chat' }))
+}
+
+// y: the prompt under the history's cursor, onto the clipboard.
+const copyTurn = async ($: EngineInterface) => {
+  const turn = (await inChat($)) ? await turnAtCursor($) : undefined
+  if (turn === undefined) return $.ui.toast('y copies a prompt: c to walk the history')
+  const copied = await $.ui.copy({ text: turn.text }).catch(() => ({ isCopied: false }))
+  $.ui.toast(copied.isCopied ? 'Prompt copied' : 'Could not copy the prompt')
+}
+
 const toggleList = async ($: EngineInterface) => {
   const found = await read($, search)
   if (found === null) return $.ui.toast('No search yet: g to grep')
@@ -1477,6 +1679,12 @@ const toggleList = async ($: EngineInterface) => {
 }
 
 const clearSearch = async ($: EngineInterface) => {
+  if (await inChat($)) {
+    await update($, history, now => ({ ...now, cursor: -1, isOpen: false }))
+    await update($, explore, (now): Explore => ({ ...now, on: 'tree' }))
+
+    return
+  }
   await update($, search, () => null)
   await update($, explore, (now): Explore => ({ ...now, on: 'tree', isAsking: false }))
 }
@@ -1484,6 +1692,7 @@ const clearSearch = async ($: EngineInterface) => {
 // f: back to following Claude.
 const follow = async ($: EngineInterface) => {
   await update($, explore, () => FOLLOWING)
+  await update($, history, now => ({ ...now, cursor: -1, isOpen: false }))
 }
 
 const KEYS = [
@@ -1497,6 +1706,8 @@ const KEYS = [
   { hotkey: 'n', label: 'next file' },
   { hotkey: 'p', label: 'prev file' },
   { hotkey: 't', label: 'tree/hits' },
+  { hotkey: 'c', label: 'history' },
+  { hotkey: 'y', label: 'copy' },
   { hotkey: 'x', label: 'clear' },
   { hotkey: 'f', label: 'follow' },
 ] as const
@@ -1513,6 +1724,8 @@ const pressKey = async ($: EngineInterface, hotkey: (typeof KEYS)[number]['hotke
     case 'n': return jumpFile($, 1)
     case 'p': return jumpFile($, -1)
     case 't': return toggleList($)
+    case 'c': return toggleChat($)
+    case 'y': return copyTurn($)
     case 'x': return clearSearch($)
     case 'f': return follow($)
   }
@@ -1540,7 +1753,7 @@ const drawKeys = async ($: EngineInterface, e: RenderEvent, width: number, isFoc
   if (!isFocused) {
     return [
       ...field,
-      <Text color={C.comment} wrap="truncate-end">ctrl+x tab: explore · j k h l · g grep · e vim</Text>,
+      <Text color={C.comment} wrap="truncate-end">ctrl+x tab: explore · j k h l · g grep · e vim · c history</Text>,
     ]
   }
 
@@ -1681,6 +1894,7 @@ export const register: Register = on => {
     if (start === 'side') void $.ui.open({ id: PANE, title: 'Files' })
     await refreshGit($, cwd, true)
     await seeChat($).catch(() => undefined)
+    await seeHistory($).catch(() => undefined)
 
     return next(e)
   })
@@ -1696,6 +1910,7 @@ export const register: Register = on => {
     const to = await $.session.id()
     if (to !== from) await branchChat($, from, to, forkAt, forkText, e.args.trim())
     await seeChat($)
+    await seeHistory($).catch(() => undefined)
 
     return ran
   }).catch(($, e, next) => next(e))
@@ -1720,7 +1935,10 @@ export const register: Register = on => {
   // Counts the prompt just answered; and a /clear starts another conversation.
   on('turn.complete', async ($, e, next) => {
     const done = await next(e)
-    if (e.agentId === undefined) await seeChat($).catch(() => undefined)
+    if (e.agentId === undefined) {
+      await seeChat($).catch(() => undefined)
+      await seeHistory($).catch(() => undefined)
+    }
 
     return done
   })
@@ -1818,11 +2036,12 @@ export const register: Register = on => {
     const { last } = await read($, activity)
     const walking = await read($, explore)
     const planRows = await drawPlan($, e, width, false)
-    const chatRows = await drawChats($, e, width, false)
+    const chatRows = [...(await drawChats($, e, width, false)), ...(await drawHistory($, e, width))]
     const gitRows = await drawGit($, e, width, walking.root ?? last?.root ?? cwd, false)
     const keyRows = await drawKeys($, e, width, e.props.isFocused)
-    // The key row wraps: two lines for it in a narrow pane.
-    const keyHeight = keyRows.length + (e.props.isFocused && width < 90 ? 1 : 0)
+    // The key row wraps: as many lines as its buttons fill.
+    const keyWidth = KEYS.reduce((sum, one) => sum + one.label.length + 3, 0) + 2 * (KEYS.length - 1)
+    const keyHeight = keyRows.length + (e.props.isFocused ? Math.ceil(keyWidth / Math.max(1, width)) - 1 : 0)
     const room = e.props.scroll.bodyRows - planRows.length - chatRows.length - gitRows.length - keyHeight
     const share = walking.on === 'search' ? SEARCH_SHARE_ON : SEARCH_SHARE
     const searchRows = await drawSearch($, e, width, Math.floor(room * share))

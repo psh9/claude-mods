@@ -76,10 +76,17 @@ export type Explore = {
   // The path under the cursor.
   cursor: string
   // Which list the cursor keys move in.
-  on: 'tree' | 'search'
+  on: 'tree' | 'search' | 'chat'
   // The grep field is showing.
   isAsking: boolean
 }
+
+// One prompt of this conversation and the answer Claude gave it.
+export type Turn = { text: string; reply: string }
+
+// This conversation's prompts, oldest first, walked with the pane's keys or
+// the mouse. `cursor` -1 is the latest; `isOpen` shows the cursor's whole.
+export type History = { turns: Turn[]; cursor: number; isOpen: boolean }
 
 // One matching line of a search.
 export type Hit = { path: string; line: number; text: string }
@@ -109,6 +116,7 @@ declare module 'claude-code' {
       layout: Shaped<Layout>
       explore: Shaped<Explore>
       search: Shaped<Search | null>
+      history: Shaped<History>
     }
   }
 }

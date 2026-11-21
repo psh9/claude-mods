@@ -163,3 +163,57 @@ test("a plan is kept per conversation, and a restarted branch shows its parent's
   expect(plans['branch-of-root-1']?.steps).toEqual([{ text: 'Commit', status: 'pending' }])
   expect(plans['root-1']?.steps).toEqual([{ text: 'Write the tests', status: 'active' }])
 })
+
+const HISTORY = [
+  { role: 'user', text: 'set up the project', toolUses: [] },
+  { role: 'assistant', text: 'Done: the project is set up.', toolUses: [] },
+  { role: 'user', text: '<command-name>/branch</command-name>', toolUses: [] },
+  { role: 'user', text: 'now write the README\nwith a legend for the badges', toolUses: [] },
+  { role: 'assistant', text: 'Reading the module first.', toolUses: [] },
+  { role: 'assistant', text: 'The README is written.', toolUses: [] },
+  { role: 'user', text: 'commit it', toolUses: [] },
+] as { role: 'user' | 'assistant'; text: string; toolUses: never[] }[]
+
+test('the history lists each prompt, and a click opens it with the answer', async ($, on) => {
+  const session = engine(on)
+  session.messages = HISTORY
+  await start($)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect((await ui.find({ type: 'Text', text: /^history/ }))?.text).toBe('history  3 prompts')
+  expect((await ui.find({ type: 'Text', text: /^1 / }))?.text).toBe('1 set up the project')
+  expect((await ui.find({ type: 'Text', text: /^2 / }))?.text).toBe('2 now write the README')
+  expect(await ui.find({ type: 'Text', text: /legend/ })).toBe(undefined)
+
+  await ui.press({ key: 'turn:1' })
+  expect((await ui.find({ type: 'Text', text: /legend/ }))?.text).toBe('  with a legend for the badges')
+  expect((await ui.find({ type: 'Text', text: /README is written/ }))?.text).toBe('  ⏺ The README is written.')
+
+  await ui.press({ key: 'turn:1' })
+  expect(await ui.find({ type: 'Text', text: /legend/ })).toBe(undefined)
+  await ui.unmount()
+})
+
+test('the keys walk the history and put a prompt back in the prompt box', async ($, on) => {
+  const session = engine(on)
+  session.messages = HISTORY
+  const filled: string[] = []
+  on('prompt.fill', (_, e) => {
+    filled.push(e.text)
+
+    return { isFilled: true } as never
+  })
+  on('ui.toast', () => ({ value: undefined }) as never)
+  await start($)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, isFocused: true } })
+  await ui.press({ key: 'key:c' })
+  await ui.press({ key: 'key:k' })
+  await ui.press({ key: 'key:k' })
+  await ui.press({ key: 'key:l' })
+  expect((await ui.find({ type: 'Text', text: /Done: the project/ }))?.text).toBe('  ⏺ Done: the project is set up.')
+  await ui.press({ key: 'key:j' })
+  await ui.press({ key: 'key:a' })
+  expect(filled).toEqual(['now write the README\nwith a legend for the badges'])
+  await ui.unmount()
+})
