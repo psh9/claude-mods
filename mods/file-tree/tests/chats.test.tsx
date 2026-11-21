@@ -194,6 +194,20 @@ test('the history lists each prompt, and a click opens it with the answer', asyn
   await ui.unmount()
 })
 
+test('the band lists the latest prompts too, and a click opens one', async ($, on) => {
+  const session = engine(on)
+  session.messages = HISTORY
+  await start($)
+  await $.command.run({ command: 'file-tree', args: 'band' } as Parameters<Dollar['command']['run']>[0])
+
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect((await band.find({ type: 'Text', text: /^history/ }))?.text).toBe('history  3 prompts')
+  expect((await band.find({ type: 'Text', text: /^3 / }))?.text).toBe('3 commit it')
+  await band.press({ key: 'turn:1' })
+  expect((await band.find({ type: 'Text', text: /README is written/ }))?.text).toBe('  ⏺ The README is written.')
+  await band.unmount()
+})
+
 test('the keys walk the history and put a prompt back in the prompt box', async ($, on) => {
   const session = engine(on)
   session.messages = HISTORY

@@ -94,6 +94,7 @@ const MAX_CHAT_ROWS = 8
 // The prompt history: prompts listed at once, and the lines an opened one
 // shows of itself and of Claude's answer.
 const MAX_TURN_ROWS = 6
+const MAX_BAND_TURN_ROWS = 3
 const MAX_PROMPT_LINES = 8
 const MAX_REPLY_LINES = 4
 const MAX_PROMPT_CHARS = 2000
@@ -1058,8 +1059,9 @@ const pressTurn = async ($: EngineInterface, index: number) => {
 
 // This conversation's prompts under the /branch tree: a row per prompt,
 // numbered, that a click opens to show it whole and the start of Claude's
-// answer. The window holds the latest, or the ones around the cursor.
-const drawHistory = async ($: EngineInterface, e: RenderEvent, width: number) => {
+// answer. The window holds the latest, or the ones around the cursor; fewer
+// of them, and no closing rule, when `isCompact` (the band).
+const drawHistory = async ($: EngineInterface, e: RenderEvent, width: number, isCompact: boolean) => {
   const { Box, Button, Text } = $.ui.resolve(e)
   const { turns, cursor, isOpen } = await read($, history)
   if (turns.length === 0) return []
@@ -1067,12 +1069,13 @@ const drawHistory = async ($: EngineInterface, e: RenderEvent, width: number) =>
   const isOn = walking.on === 'chat'
   const { current, nodes } = await read($, chats)
   const forkAt = nodes.find(chat => chat.id === current && chat.parent !== null)?.forkAt ?? 0
+  const maxRows = isCompact ? MAX_BAND_TURN_ROWS : MAX_TURN_ROWS
   const at = cursor < 0 ? turns.length - 1 : cursor
-  const start = Math.min(Math.max(0, at - Math.floor(MAX_TURN_ROWS / 2)), Math.max(0, turns.length - MAX_TURN_ROWS))
+  const start = Math.min(Math.max(0, at - Math.floor(maxRows / 2)), Math.max(0, turns.length - maxRows))
   const numberWidth = String(turns.length).length
   const indent = ' '.repeat(numberWidth + 1)
 
-  const rows = turns.slice(start, start + MAX_TURN_ROWS).flatMap((turn, offset) => {
+  const rows = turns.slice(start, start + maxRows).flatMap((turn, offset) => {
     const index = start + offset
     const isCursor = index === at && (isOn || cursor >= 0)
     const first = turn.text.split('\n').find(line => line.trim() !== '') ?? ''
@@ -1106,7 +1109,7 @@ const drawHistory = async ($: EngineInterface, e: RenderEvent, width: number) =>
     ]
   })
   const above = start
-  const below = Math.max(0, turns.length - start - MAX_TURN_ROWS)
+  const below = Math.max(0, turns.length - start - maxRows)
 
   return [
     <Box flexDirection="row" justifyContent="space-between" width={width}>
@@ -1116,7 +1119,7 @@ const drawHistory = async ($: EngineInterface, e: RenderEvent, width: number) =>
       </Text>
     </Box>,
     ...rows,
-    <Text color={C.line}>{'─'.repeat(Math.max(1, width))}</Text>,
+    ...(isCompact ? [] : [<Text color={C.line}>{'─'.repeat(Math.max(1, width))}</Text>]),
   ]
 }
 
@@ -2036,7 +2039,7 @@ export const register: Register = on => {
     const { last } = await read($, activity)
     const walking = await read($, explore)
     const planRows = await drawPlan($, e, width, false)
-    const chatRows = [...(await drawChats($, e, width, false)), ...(await drawHistory($, e, width))]
+    const chatRows = [...(await drawChats($, e, width, false)), ...(await drawHistory($, e, width, false))]
     const gitRows = await drawGit($, e, width, walking.root ?? last?.root ?? cwd, false)
     const keyRows = await drawKeys($, e, width, e.props.isFocused)
     // The key row wraps: as many lines as its buttons fill.
@@ -2070,7 +2073,7 @@ export const register: Register = on => {
     const columnWidth = Math.floor(width / columns) - 1
     const { last } = await read($, activity)
     const planRows = await drawPlan($, e, width, true)
-    const chatRows = await drawChats($, e, width, true)
+    const chatRows = [...(await drawChats($, e, width, true)), ...(await drawHistory($, e, width, true))]
     const gitRows = await drawGit($, e, width, last?.root ?? cwd, true)
     const perColumn = Math.max(3, e.props.scroll.bodyRows - 2 - planRows.length - chatRows.length - gitRows.length)
     const { header, view, lines } = await drawTree($, e, columnWidth, perColumn * columns + 1)

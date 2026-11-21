@@ -142,6 +142,8 @@ history  12 prompts                        ↑6
 
 Click a prompt to open it: its whole text shows, then the start of Claude's answer after `⏺`. Click it again to close it. With the pane focused, `c` puts the cursor in the history: `j` / `k` (or `n` / `p`) step to the next or earlier prompt, `l` opens it, `h` closes it (and again goes back to the tree), `a` puts the prompt back in the prompt box to edit or ask again, `y` copies it, `x` or `f` returns to the latest. The transcript itself does not scroll: a mod cannot move it.
 
+In the band layout the history shows the latest three prompts under the `chat` line; a click opens one there the same way.
+
 ### Footer
 
 `also ~/other-folder  M1 R4` lines list the other folders touched this session, with their totals, so nothing drops out of sight when the tree moves.
